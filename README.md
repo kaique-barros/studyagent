@@ -28,7 +28,8 @@ Moodle, planejador, materiais/RAG, FSRS nem a interface no Quickshell.
 
 ```bash
 sudo install -d /opt/studyagent && sudo python -m venv /opt/studyagent/venv
-sudo /opt/studyagent/venv/bin/pip install /caminho/para/studyagent
+sudo /opt/studyagent/venv/bin/pip install -r /caminho/para/studyagent/requirements.txt
+sudo /opt/studyagent/venv/bin/pip install --no-deps /caminho/para/studyagent
 sudo install -m644 deploy/studyagent.sysusers /etc/sysusers.d/studyagent.conf && sudo systemd-sysusers
 sudo usermod -aG studyagent $USER            # acesso ao socket (faça logout/login)
 
@@ -46,7 +47,7 @@ Tokens (rode como o usuário do agente; o token só aparece uma vez):
 ```bash
 SA="sudo -u studyagent env STUDYAGENT_STATE_DIR=/var/lib/studyagent /opt/studyagent/venv/bin/studyagent"
 $SA admin init
-$SA admin token-create shell user --out /tmp/shell.token
+$SA admin token-create shell user --replace --out /tmp/shell.token   # --replace: substitui um token "shell" antigo
 mkdir -p ~/.config/studyagent && sudo install -m600 -o $USER /tmp/shell.token ~/.config/studyagent/token && sudo shred -u /tmp/shell.token
 ```
 
@@ -80,7 +81,7 @@ Exemplo: `curl --unix-socket /run/studyagent/api.sock -H "Authorization: Bearer 
 ## Desenvolvimento
 
 ```bash
-python -m venv .venv && . .venv/bin/activate && pip install -e '.[dev]' && pytest
+python -m venv .venv && . .venv/bin/activate && pip install -r requirements-dev.txt && pip install -e . --no-deps && pytest
 STUDYAGENT_STATE_DIR=./state STUDYAGENT_SOCKET=/tmp/sa.sock studyagent admin init && studyagent serve
 ```
 

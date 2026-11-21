@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -139,17 +140,23 @@ def admin_init():
 
 
 @admin_app.command("token-create")
-def admin_token_create(name: str, scope: str, out: Optional[Path] = typer.Option(None, help="grava o token neste arquivo (0600)")):
+def admin_token_create(name: str, scope: str,
+                       out: Optional[Path] = typer.Option(None, help="grava o token neste arquivo (0600)"),
+                       replace: bool = typer.Option(False, "--replace", help="substitui um token existente com o mesmo nome")):
     """Gera um token. Escopos: user, moodle, planner, schedule, viewer. O token só aparece uma vez."""
     s = Settings()
     conn = connect(s.db_path)
     migrate(conn)
+    if replace:
+        conn.execute("DELETE FROM token WHERE name=?", (name,))
     try:
         token = auth.create_token(conn, name, scope, datetime.now().astimezone().replace(microsecond=0).isoformat())
     except ValueError as e:
         typer.echo(str(e), err=True); raise typer.Exit(1)
-    except Exception as e:  # nome repetido etc.
-        typer.echo(f"erro: {e}", err=True); raise typer.Exit(1)
+    except sqlite3.IntegrityError:
+        typer.echo(f"já existe um token chamado '{name}'. Use --replace para gerar outro no lugar dele "
+                   "(o antigo para de funcionar) ou escolha outro nome.", err=True)
+        raise typer.Exit(1)
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
