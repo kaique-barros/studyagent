@@ -1,0 +1,289 @@
+"""Regras de negócio do core. Toda mudança passa por aqui: valida invariantes, grava e emite evento."""
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import date, datetime, timedelta
+from typing import Any, Callable
+
+from .auth import KINDS_OF_SCOPE, Actor
+from .config import Settings
+from .db import tx
+from .models import ProposalIn, RescheduleIn, TaskIn
+
+Clock = Callable[[], datetime]
+
+
+class Rejected(Exception):
+    """A operação viola uma regra; `status` sugere o código HTTP."""
+
+    def __init__(self, message: str, status: int = 422):
+        super().__init__(message)
+        self.status = status
+
+
+def system_clock() -> datetime:
+    return datetime.now().astimezone()
+
+
+def iso(dt: datetime) -> str:
+    return dt.replace(microsecond=0).isoformat()
+
+
+def day_key(now: datetime, start_hour: int) -> str:
+    return (now - timedelta(hours=start_hour)).date().isoformat()
+
+
+def _row(r: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(r) if r is not None else None
+
+
+class Service:
+    def __init__(self, conn: sqlite3.Connection, settings: Settings, clock: Clock = system_clock):
+        self.conn = conn
+        self.settings = settings
+        self.clock = clock
+
+    # ---------- util ----------
+    def now(self) -> str:
+        return iso(self.clock())
+
+    def today(self) -> str:
+        return day_key(self.clock(), self.settings.day_start_hour)
+
+    def emit(self, type_: str, payload: dict[str, Any]) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO event(ts, type, payload) VALUES (?,?,?)",
+            (self.now(), type_, json.dumps(payload, ensure_ascii=False, default=str)),
+        )
+        return int(cur.lastrowid)
+
+    def get_task(self, task_id: int) -> dict[str, Any]:
+        t = _row(self.conn.execute("SELECT * FROM task WHERE id=?", (task_id,)).fetchone())
+        if t is None:
+            raise Rejected("tarefa não encontrada", 404)
+        return t
+
+    def _check_dates(self, due: date | None, planned: date | None) -> None:
+        today = date.fromisoformat(self.today())
+        for name, d in (("due", due), ("planned_for", planned)):
+            if d is not None and not (today - timedelta(days=366) <= d <= today + timedelta(days=730)):
+                raise Rejected(f"{name} fora da faixa plausível ({d})")
+
+    # ---------- leitura ----------
+    def list_tasks(self, status: str | None = None, date_from: str | None = None, date_to: str | None = None) -> list[dict[str, Any]]:
+        sql, args = "SELECT * FROM task WHERE 1=1", []
+        if status:
+            sql += " AND status=?"; args.append(status)
+        if date_from:
+            sql += " AND COALESCE(planned_for, due, '9999') >= ?"; args.append(date_from)
+        if date_to:
+            sql += " AND COALESCE(planned_for, due, '0000') <= ?"; args.append(date_to)
+        sql += " ORDER BY COALESCE(planned_for, due, '9999-12-31'), id"
+        return [dict(r) for r in self.conn.execute(sql, args)]
+
+    def summary(self) -> dict[str, Any]:
+        today = self.today()
+        q = lambda sql, *a: self.conn.execute(sql, a).fetchone()[0]  # noqa: E731
+        return {
+            "today": today,
+            "open_total": q("SELECT COUNT(*) FROM task WHERE status='open'"),
+            "open_due_today": q("SELECT COUNT(*) FROM task WHERE status='open' AND COALESCE(planned_for, due)=?", today),
+            "overdue": q("SELECT COUNT(*) FROM task WHERE status='open' AND due < ?", today),
+            "done_today": self._done_on_day(today),
+            "pending_proposals": q("SELECT COUNT(*) FROM proposal WHERE status='pending'"),
+        }
+
+    def _done_on_day(self, day: str) -> int:
+        # o "dia" vira às day_start_hour: conta pelo evento de conclusão (que guarda o `day`)
+        n = 0
+        for r in self.conn.execute("SELECT payload FROM event WHERE type='task.completed'"):
+            if json.loads(r["payload"]).get("day") == day:
+                n += 1
+        return n
+
+    def events(self, after: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM event WHERE id>? ORDER BY id LIMIT ?", (after, min(limit, 1000))).fetchall()
+        return [{"id": r["id"], "ts": r["ts"], "type": r["type"], "payload": json.loads(r["payload"])} for r in rows]
+
+    def list_proposals(self, status: str | None = None) -> list[dict[str, Any]]:
+        sql, args = "SELECT * FROM proposal", []
+        if status:
+            sql += " WHERE status=?"; args.append(status)
+        sql += " ORDER BY id"
+        out = []
+        for r in self.conn.execute(sql, args):
+            d = dict(r); d["payload"] = json.loads(d["payload"]); out.append(d)
+        return out
+
+    # ---------- criar / atualizar tarefas ----------
+    def _kind_for(self, actor: Actor, payload: TaskIn) -> str:
+        allowed = KINDS_OF_SCOPE.get(actor.scope, set())
+        kind = payload.kind or sorted(allowed)[0]
+        if kind not in allowed:
+            raise Rejected(f"o escopo '{actor.scope}' não pode criar tarefas do tipo '{kind}'", 403)
+        return kind
+
+    def create_task(self, actor: Actor, p: TaskIn) -> tuple[dict[str, Any], bool]:
+        """Cria (201) ou, se `source_ref` já existe na mesma origem, atualiza (200). Retorna (tarefa, criada)."""
+        if not actor.can("tasks:create"):
+            raise Rejected("sem permissão para criar tarefas", 403)
+        kind = self._kind_for(actor, p)
+        self._check_dates(p.due, p.planned_for)
+        source = actor.source
+        with tx(self.conn):
+            existing = None
+            if p.source_ref:
+                existing = self.conn.execute("SELECT * FROM task WHERE source=? AND source_ref=?", (source, p.source_ref)).fetchone()
+            if existing is None:
+                now = self.now()
+                cur = self.conn.execute(
+                    "INSERT INTO task(title, course, due, planned_for, est_minutes, kind, source, source_ref, tag, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (p.title, p.course, _d(p.due), _d(p.planned_for), p.est_minutes, kind, source, p.source_ref, p.tag, now, now),
+                )
+                task = self.get_task(int(cur.lastrowid))
+                self.emit("task.created", {"task_id": task["id"], "title": task["title"], "source": source, "due": task["due"]})
+                return task, True
+            task = dict(existing)
+            return self._update_from_source(task, p, source), False
+
+    def _update_from_source(self, task: dict[str, Any], p: TaskIn, source: str) -> dict[str, Any]:
+        # tarefa já concluída ou descartada não é reaberta pela origem
+        if task["status"] != "open":
+            return task
+        new = {"title": p.title, "course": p.course, "due": _d(p.due), "est_minutes": p.est_minutes, "tag": p.tag}
+        if p.planned_for is not None:
+            new["planned_for"] = _d(p.planned_for)
+        changed = {k: v for k, v in new.items() if task.get(k) != v}
+        if not changed:
+            return task
+        sets = ", ".join(f"{k}=?" for k in changed)
+        self.conn.execute(f"UPDATE task SET {sets}, updated_at=? WHERE id=?", (*changed.values(), self.now(), task["id"]))
+        self.emit("task.updated", {"task_id": task["id"], "source": source, "changed": {k: {"from": task.get(k), "to": v} for k, v in changed.items()}})
+        return self.get_task(task["id"])
+
+    # ---------- concluir ----------
+    def complete_task(self, actor: Actor, task_id: int) -> dict[str, Any]:
+        if not actor.can("tasks:complete"):
+            raise Rejected("sem permissão para concluir tarefas", 403)
+        with tx(self.conn):
+            task = self.get_task(task_id)
+            if task["status"] == "done":
+                return task                              # idempotente: não gera evento nem XP de novo
+            if task["status"] == "dropped":
+                raise Rejected("tarefa descartada não pode ser concluída", 409)
+            now = self.clock()
+            day = day_key(now, self.settings.day_start_hour)
+            late = bool(task["due"]) and task["due"] < day
+            self.conn.execute("UPDATE task SET status='done', done_at=?, updated_at=? WHERE id=?", (iso(now), iso(now), task_id))
+            self.emit("task.completed", {
+                "task_id": task_id, "title": task["title"], "due": task["due"], "tag": task["tag"], "kind": task["kind"],
+                "course": task["course"], "day": day, "late": late, "verification": task["verification"],
+            })
+            return self.get_task(task_id)
+
+    # ---------- propostas ----------
+    def create_proposal(self, actor: Actor, p: ProposalIn) -> dict[str, Any]:
+        is_request = actor.can("tasks:request")
+        if not (actor.can("proposals:create") or is_request):
+            raise Rejected("sem permissão para propor mudanças", 403)
+        task_id, task_version, payload = None, None, {}
+        if p.kind == "task.create":
+            if p.task is None:
+                raise Rejected("task.create exige o campo 'task'")
+            kind = self._kind_for(actor, p.task)
+            self._check_dates(p.task.due, p.task.planned_for)
+            payload = {**p.task.model_dump(mode="json"), "kind": kind}
+        else:
+            if p.task_id is None:
+                raise Rejected(f"{p.kind} exige 'task_id'")
+            task = self.get_task(p.task_id)
+            if task["status"] != "open":
+                raise Rejected("só tarefas abertas podem mudar", 409)
+            task_id, task_version = task["id"], task["updated_at"]
+            if p.kind == "task.reschedule":
+                r = RescheduleIn(due=p.due, planned_for=p.planned_for, reason=p.reason)
+                self._check_dates(r.due, r.planned_for)
+                # prazo de tarefa vinda de uma origem externa é da origem: ninguém muda
+                if r.due is not None and task["source"] in ("moodle",):
+                    raise Rejected("o prazo de tarefas do Moodle vem do Moodle; mude 'planned_for'", 403)
+                payload = {"due": _d(r.due), "planned_for": _d(r.planned_for)}
+        with tx(self.conn):
+            cur = self.conn.execute(
+                "INSERT INTO proposal(source, kind, payload, reason, task_id, task_version, created_at) VALUES (?,?,?,?,?,?,?)",
+                (actor.source if actor.scope != "user" else "manual", p.kind, json.dumps(payload, ensure_ascii=False), p.reason, task_id, task_version, self.now()),
+            )
+            pid = int(cur.lastrowid)
+            self.emit("proposal.created", {"proposal_id": pid, "kind": p.kind, "task_id": task_id, "source": actor.source, "reason": p.reason})
+        return self.get_proposal(pid)
+
+    def get_proposal(self, pid: int) -> dict[str, Any]:
+        r = self.conn.execute("SELECT * FROM proposal WHERE id=?", (pid,)).fetchone()
+        if r is None:
+            raise Rejected("proposta não encontrada", 404)
+        d = dict(r); d["payload"] = json.loads(d["payload"]); return d
+
+    def decide(self, actor: Actor, pid: int, approve: bool) -> dict[str, Any]:
+        if not actor.can("proposals:decide"):
+            raise Rejected("só o usuário decide propostas", 403)
+        with tx(self.conn):
+            prop = self.get_proposal(pid)
+            if prop["status"] != "pending":
+                raise Rejected(f"proposta já está '{prop['status']}'", 409)
+            now = self.now()
+            if not approve:
+                self.conn.execute("UPDATE proposal SET status='rejected', decided_at=? WHERE id=?", (now, pid))
+                self.emit("proposal.rejected", {"proposal_id": pid, "kind": prop["kind"], "task_id": prop["task_id"]})
+                return self.get_proposal(pid)
+            try:
+                result = self._apply(prop)
+            except Rejected as e:
+                # a tarefa mudou desde a proposta (ou ficou inválida): não aplica
+                self.conn.execute("UPDATE proposal SET status='stale', decided_at=?, result=? WHERE id=?", (now, str(e), pid))
+                self.emit("proposal.stale", {"proposal_id": pid, "reason": str(e)})
+                return self.get_proposal(pid)
+            self.conn.execute("UPDATE proposal SET status='applied', decided_at=?, result=? WHERE id=?", (now, json.dumps(result), pid))
+            self.emit("proposal.approved", {"proposal_id": pid, "kind": prop["kind"], "task_id": result.get("task_id")})
+            return self.get_proposal(pid)
+
+    def _apply(self, prop: dict[str, Any]) -> dict[str, Any]:
+        k, payload = prop["kind"], prop["payload"]
+        if k == "task.create":
+            now = self.now()
+            self._check_dates(_pd(payload.get("due")), _pd(payload.get("planned_for")))
+            ref = payload.get("source_ref")
+            if ref and self.conn.execute("SELECT 1 FROM task WHERE source=? AND source_ref=?", (prop["source"], ref)).fetchone():
+                raise Rejected("já existe uma tarefa com esse source_ref")
+            cur = self.conn.execute(
+                "INSERT INTO task(title, course, due, planned_for, est_minutes, kind, source, source_ref, tag, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (payload["title"], payload.get("course"), payload.get("due"), payload.get("planned_for"), payload.get("est_minutes"),
+                 payload["kind"], prop["source"], ref, payload.get("tag"), now, now),
+            )
+            tid = int(cur.lastrowid)
+            self.emit("task.created", {"task_id": tid, "title": payload["title"], "source": prop["source"], "due": payload.get("due")})
+            return {"task_id": tid}
+        task = self.get_task(prop["task_id"])
+        if task["status"] != "open" or task["updated_at"] != prop["task_version"]:
+            raise Rejected("a tarefa mudou desde a proposta")
+        now = self.now()
+        if k == "task.reschedule":
+            sets, args = [], []
+            for f in ("due", "planned_for"):
+                if payload.get(f):
+                    sets.append(f"{f}=?"); args.append(payload[f])
+            self.conn.execute(f"UPDATE task SET {', '.join(sets)}, updated_at=? WHERE id=?", (*args, now, task["id"]))
+            self.emit("task.updated", {"task_id": task["id"], "source": "proposal", "changed": {k: v for k, v in payload.items() if v}})
+        elif k == "task.drop":
+            self.conn.execute("UPDATE task SET status='dropped', updated_at=? WHERE id=?", (now, task["id"]))
+            self.emit("task.dropped", {"task_id": task["id"], "title": task["title"]})
+        return {"task_id": task["id"]}
+
+
+def _d(d: date | None) -> str | None:
+    return d.isoformat() if d else None
+
+
+def _pd(s: str | None) -> date | None:
+    return date.fromisoformat(s) if s else None

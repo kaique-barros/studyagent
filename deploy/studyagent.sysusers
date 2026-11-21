@@ -1,0 +1,2 @@
+# /etc/sysusers.d/studyagent.conf
+u studyagent - "studyagent (agente de estudos)" /var/lib/studyagent /usr/bin/nologin

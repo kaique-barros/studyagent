@@ -1,0 +1,40 @@
+# /etc/systemd/system/studyagentd.service
+# Ajuste ExecStart (onde instalou) e ReadWritePaths (pasta do projeção no vault).
+[Unit]
+Description=studyagent: daemon de tarefas e estudos
+After=local-fs.target
+
+[Service]
+Type=simple
+User=studyagent
+Group=studyagent
+ExecStart=/opt/studyagent/venv/bin/studyagent serve
+Environment="STUDYAGENT_TASKS_FILE=/home/kaiqbbrs/Obsidian Vault/Agente/Tarefas.md"
+Restart=on-failure
+RestartSec=3
+
+# estado em /var/lib/studyagent (só o agente lê) e socket em /run/studyagent (grupo studyagent)
+StateDirectory=studyagent
+StateDirectoryMode=0700
+RuntimeDirectory=studyagent
+RuntimeDirectoryMode=0750
+
+# endurecimento
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/kaiqbbrs/Obsidian\x20Vault/Agente
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
