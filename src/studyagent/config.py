@@ -33,6 +33,17 @@ class Settings:
     lane_done: str = field(default_factory=lambda: os.environ.get("STUDYAGENT_LANE_DONE", "Concluído"))
     done_visible_days: int = 14               # concluídas aparecem na coluna "Concluído" por tantos dias
     day_start_hour: int = 4                   # o "dia" vira às 04:00
+    # planejador
+    planner_enabled: bool = field(default_factory=lambda: os.environ.get("STUDYAGENT_PLANNER", "1") != "0")
+    daily_target: int = 4                     # tarefas por dia
+    dayoff_target: int = 2                    # tarefas em dia de folga
+    horizon_days: int = 14                    # quantos dias à frente o planejador organiza
+    near_due_days: int = 3                    # prazo dentro dessa janela dispara um replanejamento
+    programmed_goal: int = 24                 # tarefas abertas "programadas" para a sequência não depender de sorte
+    dayoff_max_month: int = 10
+    dayoff_min_month: int = 4
+    dayoff_lead_days: int = 1                 # folga só pode ser criada/removida com 1 dia de antecedência
+    planner_check_seconds: int = 300          # o daemon confere se precisa planejar a cada 5 min
 
     @property
     def db_path(self) -> Path:

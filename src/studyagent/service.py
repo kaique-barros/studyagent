@@ -10,6 +10,7 @@ from .auth import KINDS_OF_SCOPE, Actor
 from .config import Settings
 from .db import tx
 from .models import ProposalIn, RescheduleIn, TaskIn
+from .planner import PlanConfig, make_plan, suggest_dayoffs
 
 Clock = Callable[[], datetime]
 
@@ -92,6 +93,9 @@ class Service:
             "overdue": q("SELECT COUNT(*) FROM task WHERE status='open' AND due < ?", today),
             "done_today": self._done_on_day(today),
             "pending_proposals": q("SELECT COUNT(*) FROM proposal WHERE status='pending'"),
+            "programmed": q("SELECT COUNT(*) FROM task WHERE status='open'"),
+            "programmed_goal": self.settings.programmed_goal,
+            "dayoff_today": today in self.dayoffs(),
         }
 
     def _done_on_day(self, day: str) -> int:
@@ -144,9 +148,15 @@ class Service:
                 )
                 task = self.get_task(int(cur.lastrowid))
                 self.emit("task.created", {"task_id": task["id"], "title": task["title"], "source": source, "due": task["due"]})
-                return task, True
-            task = dict(existing)
-            return self._update_from_source(task, p, source), False
+                created = True
+            else:
+                before = dict(existing)
+                task = self._update_from_source(before, p, source)
+                created = False
+                if task["updated_at"] == before["updated_at"]:
+                    return task, False                   # nada mudou: não replaneja
+        self._near_due_trigger(task)
+        return task, created
 
     def _update_from_source(self, task: dict[str, Any], p: TaskIn, source: str) -> dict[str, Any]:
         # tarefa já concluída ou descartada não é reaberta pela origem
@@ -245,10 +255,17 @@ class Service:
                 return self.get_proposal(pid)
             self.conn.execute("UPDATE proposal SET status='applied', decided_at=?, result=? WHERE id=?", (now, json.dumps(result), pid))
             self.emit("proposal.approved", {"proposal_id": pid, "kind": prop["kind"], "task_id": result.get("task_id")})
-            return self.get_proposal(pid)
+            out = self.get_proposal(pid)
+        if prop["kind"] == "task.create" and result.get("task_id"):
+            self._near_due_trigger(self.get_task(result["task_id"]))
+        return out
 
     def _apply(self, prop: dict[str, Any]) -> dict[str, Any]:
         k, payload = prop["kind"], prop["payload"]
+        if k == "plan.apply":
+            return self._apply_plan(payload)
+        if k == "dayoff.add":
+            return self._apply_dayoffs(payload)
         if k == "task.create":
             now = self.now()
             self._check_dates(_pd(payload.get("due")), _pd(payload.get("planned_for")))
@@ -279,6 +296,165 @@ class Service:
             self.conn.execute("UPDATE task SET status='dropped', updated_at=? WHERE id=?", (now, task["id"]))
             self.emit("task.dropped", {"task_id": task["id"], "title": task["title"]})
         return {"task_id": task["id"]}
+
+
+    # ---------- folgas ----------
+    def dayoffs(self) -> set[str]:
+        return {r["date"] for r in self.conn.execute("SELECT date FROM dayoff")}
+
+    def _month_count(self, month: str) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM dayoff WHERE date LIKE ?", (month + "-%",)).fetchone()[0]
+
+    def _earliest_dayoff(self) -> str:
+        return (date.fromisoformat(self.today()) + timedelta(days=self.settings.dayoff_lead_days)).isoformat()
+
+    def _insert_dayoff(self, day: str, source: str) -> bool:
+        """Valida e grava; devolve False se já existia. Levanta Rejected se violar uma regra."""
+        if day < self._earliest_dayoff():
+            raise Rejected(f"folga só pode ser criada com {self.settings.dayoff_lead_days} dia(s) de antecedência (a partir de {self._earliest_dayoff()})")
+        if day > (date.fromisoformat(self.today()) + timedelta(days=366)).isoformat():
+            raise Rejected("data longe demais")
+        if self.conn.execute("SELECT 1 FROM dayoff WHERE date=?", (day,)).fetchone():
+            return False
+        if self._month_count(day[:7]) >= self.settings.dayoff_max_month:
+            raise Rejected(f"máximo de {self.settings.dayoff_max_month} folgas em {day[:7]}", 409)
+        self.conn.execute("INSERT INTO dayoff(date, source, created_at) VALUES (?,?,?)", (day, source, self.now()))
+        self.emit("dayoff.added", {"date": day, "source": source})
+        return True
+
+    def add_dayoff(self, actor: Actor, day: date) -> dict[str, Any]:
+        if not actor.can("dayoffs:write"):
+            raise Rejected("sem permissão para mudar folgas", 403)
+        with tx(self.conn):
+            added = self._insert_dayoff(day.isoformat(), "manual")
+        if added:
+            self._replan("dayoff")
+        return {"date": day.isoformat(), "added": added}
+
+    def remove_dayoff(self, actor: Actor, day: date) -> dict[str, Any]:
+        if not actor.can("dayoffs:write"):
+            raise Rejected("sem permissão para mudar folgas", 403)
+        d = day.isoformat()
+        with tx(self.conn):
+            if not self.conn.execute("SELECT 1 FROM dayoff WHERE date=?", (d,)).fetchone():
+                raise Rejected("essa data não é folga", 404)
+            if d < self._earliest_dayoff():
+                raise Rejected("folga de hoje ou do passado não pode ser removida")
+            n = self._month_count(d[:7])
+            if n <= self.settings.dayoff_min_month:
+                raise Rejected(f"o mês precisa de pelo menos {self.settings.dayoff_min_month} folgas", 409)
+            self.conn.execute("DELETE FROM dayoff WHERE date=?", (d,))
+            self.emit("dayoff.removed", {"date": d})
+        self._replan("dayoff")
+        return {"date": d, "removed": True}
+
+    def _apply_dayoffs(self, payload: dict[str, Any]) -> dict[str, Any]:
+        added, skipped = [], []
+        for d in payload.get("dates", []):
+            try:
+                if self._insert_dayoff(d, "planner"):
+                    added.append(d)
+            except Rejected:
+                skipped.append(d)
+        if not added and skipped:
+            raise Rejected("nenhuma das folgas sugeridas pôde ser criada")
+        return {"added": added, "skipped": skipped}
+
+    # ---------- planejador ----------
+    def _plan_cfg(self) -> PlanConfig:
+        s = self.settings
+        return PlanConfig(s.daily_target, s.dayoff_target, s.horizon_days, s.programmed_goal)
+
+    def _build_plan(self):
+        tasks = self.list_tasks("open")
+        return make_plan(tasks, self.dayoffs(), self.today(), self._plan_cfg())
+
+    def plan_preview(self) -> dict[str, Any]:
+        plan = self._build_plan()
+        out = plan.to_dict()
+        out["capacity"] = plan.capacity
+        out["load"] = plan.load
+        out["dayoff_suggestions"] = suggest_dayoffs(
+            self.dayoffs(), self.today(), self.settings.horizon_days, self._earliest_dayoff(),
+            self.settings.dayoff_min_month, self.settings.dayoff_max_month)
+        return out
+
+    def _get_meta(self, key: str) -> str | None:
+        r = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return r["value"] if r else None
+
+    def _supersede(self, kind: str, keep_id: int | None = None) -> None:
+        self.conn.execute(
+            "UPDATE proposal SET status='stale', decided_at=?, result='substituída por um plano mais novo' "
+            "WHERE status='pending' AND kind=? AND id IS NOT ?", (self.now(), kind, keep_id))
+
+    def plan_run(self, reason: str = "manual") -> dict[str, Any]:
+        """Calcula o plano e o registra como PROPOSTA (nada muda até você aprovar)."""
+        created: list[int] = []
+        with tx(self.conn):
+            today = self.today()
+            plan = self._build_plan()
+            by_id = {t["id"]: t for t in self.list_tasks("open")}
+            moves = [{"task_id": m.task_id, "title": m.title, "from": m.frm, "to": m.to, "task_version": by_id[m.task_id]["updated_at"]}
+                     for m in plan.moves]
+            sig = json.dumps([[m["task_id"], m["to"]] for m in moves])
+            pending = [p for p in self.list_proposals("pending") if p["kind"] == "plan.apply"]
+            if not moves:
+                self._supersede("plan.apply")
+            elif not any(json.dumps([[m["task_id"], m["to"]] for m in p["payload"]["moves"]]) == sig for p in pending):
+                self._supersede("plan.apply")
+                stats = {k: v for k, v in plan.to_dict().items() if k != "moves"}
+                cur = self.conn.execute(
+                    "INSERT INTO proposal(source, kind, payload, reason, created_at) VALUES ('planner','plan.apply',?,?,?)",
+                    (json.dumps({"moves": moves, "stats": stats}, ensure_ascii=False), f"replanejamento ({reason})", self.now()))
+                pid = int(cur.lastrowid); created.append(pid)
+                self.emit("plan.proposed", {"proposal_id": pid, "moves": len(moves), "reason": reason,
+                                            "overloaded": plan.overloaded, "overdue": plan.overdue})
+            dates = suggest_dayoffs(self.dayoffs(), today, self.settings.horizon_days, self._earliest_dayoff(),
+                                    self.settings.dayoff_min_month, self.settings.dayoff_max_month)
+            pend_d = [p for p in self.list_proposals("pending") if p["kind"] == "dayoff.add"]
+            if not dates:
+                self._supersede("dayoff.add")
+            elif not any(p["payload"].get("dates") == dates for p in pend_d):
+                self._supersede("dayoff.add")
+                cur = self.conn.execute(
+                    "INSERT INTO proposal(source, kind, payload, reason, created_at) VALUES ('planner','dayoff.add',?,?,?)",
+                    (json.dumps({"dates": dates}), f"faltam folgas (mínimo {self.settings.dayoff_min_month} por mês)", self.now()))
+                pid = int(cur.lastrowid); created.append(pid)
+                self.emit("proposal.created", {"proposal_id": pid, "kind": "dayoff.add", "task_id": None, "source": "planner", "reason": "folgas mínimas"})
+            self.conn.execute("INSERT INTO meta(key,value) VALUES('last_plan_day',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (today,))
+        return {"created_proposals": created, "moves": len(moves), "plan": plan.to_dict(), "dayoff_suggestions": dates}
+
+    def _replan(self, reason: str) -> None:
+        if self.settings.planner_enabled:
+            self.plan_run(reason)
+
+    def _near_due_trigger(self, task: dict[str, Any]) -> None:
+        if task["status"] == "open" and task["due"] and \
+                task["due"] <= (date.fromisoformat(self.today()) + timedelta(days=self.settings.near_due_days)).isoformat():
+            self._replan("prazo próximo")
+
+    def maybe_daily_plan(self) -> bool:
+        """Roda no primeiro boot/checagem do dia."""
+        if not self.settings.planner_enabled or self._get_meta("last_plan_day") == self.today():
+            return False
+        self.plan_run("início do dia")
+        return True
+
+    def _apply_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        applied, skipped = [], []
+        today = date.fromisoformat(self.today())
+        for m in payload["moves"]:
+            row = self.conn.execute("SELECT * FROM task WHERE id=?", (m["task_id"],)).fetchone()
+            if row is None or row["status"] != "open" or row["updated_at"] != m["task_version"]:
+                skipped.append(m["task_id"]); continue
+            self._check_dates(None, _pd(m["to"]))
+            self.conn.execute("UPDATE task SET planned_for=?, updated_at=? WHERE id=?", (m["to"], self.now(), row["id"]))
+            applied.append(m["task_id"])
+        if not applied:
+            raise Rejected("todas as tarefas do plano mudaram desde a proposta")
+        self.emit("plan.applied", {"applied": applied, "skipped": skipped})
+        return {"applied": applied, "skipped": skipped}
 
 
 def _d(d: date | None) -> str | None:

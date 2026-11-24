@@ -1,7 +1,9 @@
 
 import asyncio
+import contextlib
 import json
 import sqlite3
+from datetime import date
 from typing import Annotated, Any, Iterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
@@ -11,7 +13,7 @@ from . import __version__, projection
 from .auth import Actor, authenticate
 from .config import Settings
 from .db import connect, migrate
-from .models import ProposalIn, ReasonIn, RescheduleIn, TaskIn
+from .models import DayoffIn, ProposalIn, ReasonIn, RescheduleIn, TaskIn
 from .service import Clock, Rejected, Service, system_clock
 
 
@@ -22,7 +24,16 @@ def create_app(settings: Settings | None = None, clock: Clock = system_clock) ->
     migrate(boot)
     boot.close()
 
-    app = FastAPI(title="studyagent", version=__version__)
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI):
+        task = asyncio.create_task(_planner_loop(settings, clock)) if settings.planner_enabled else None
+        try:
+            yield
+        finally:
+            if task:
+                task.cancel()
+
+    app = FastAPI(title="studyagent", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.clock = clock
 
@@ -127,6 +138,30 @@ def create_app(settings: Settings | None = None, clock: Clock = system_clock) ->
     def reject(pid: int, conn: Conn, actor: Who) -> dict[str, Any]:
         return svc(conn).decide(actor, pid, False)
 
+    # ---------- folgas e planejador ----------
+    @app.get("/dayoffs")
+    def list_dayoffs(conn: Conn, actor: Who) -> list[str]:
+        need(actor, "tasks:read")
+        return sorted(svc(conn).dayoffs())
+
+    @app.post("/dayoffs", status_code=201)
+    def add_dayoff(body: DayoffIn, conn: Conn, actor: Who) -> dict[str, Any]:
+        return svc(conn).add_dayoff(actor, body.date)
+
+    @app.delete("/dayoffs/{day}")
+    def remove_dayoff(day: date, conn: Conn, actor: Who) -> dict[str, Any]:
+        return svc(conn).remove_dayoff(actor, day)
+
+    @app.get("/planner/preview")
+    def planner_preview(conn: Conn, actor: Who) -> dict[str, Any]:
+        need(actor, "tasks:read")
+        return svc(conn).plan_preview()
+
+    @app.post("/planner/run")
+    def planner_run(conn: Conn, actor: Who) -> dict[str, Any]:
+        need(actor, "planner:run")
+        return svc(conn).plan_run("manual")
+
     # ---------- eventos ----------
     @app.get("/events")
     def events(conn: Conn, actor: Who, after: int = 0, limit: int = 200) -> list[dict[str, Any]]:
@@ -157,6 +192,23 @@ def create_app(settings: Settings | None = None, clock: Clock = system_clock) ->
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
 
     return app
+
+
+async def _planner_loop(settings: Settings, clock: Clock) -> None:
+    """No primeiro boot do dia (e a cada checagem) planeja se ainda não planejou hoje."""
+    def tick() -> None:
+        conn = connect(settings.db_path)
+        try:
+            Service(conn, settings, clock).maybe_daily_plan()
+        finally:
+            conn.close()
+
+    while True:
+        try:
+            await asyncio.to_thread(tick)
+        except Exception as e:  # o laço nunca morre por causa de um erro pontual
+            print(f"studyagent: erro no planejador: {e}", flush=True)
+        await asyncio.sleep(settings.planner_check_seconds)
 
 
 def _fetch(settings: Settings, after: int) -> list[dict[str, Any]]:

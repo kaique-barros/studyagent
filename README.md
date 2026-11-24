@@ -64,7 +64,26 @@ studyagent task move 2 --plan 2026-11-26 --reason "prova dia 27"   # vira propos
 studyagent proposal list
 studyagent proposal approve 1
 studyagent events -f                                                # acompanha em tempo real (SSE)
+
+studyagent dayoff add 2026-11-29       # folga: meta do dia cai de 4 para 2 tarefas
+studyagent dayoff list | remove 2026-11-29
+studyagent plan show                   # o que o planejador faria agora (não grava)
+studyagent plan run                    # gera propostas do plano; aprove com `proposal approve`
 ```
+
+## Planejador (determinístico, sem LLM)
+
+- Meta: 4 tarefas/dia (2 em dia de folga); horizonte de 14 dias; capacidade contada **por tarefa** (sem `est_minutes`).
+- Tarefas com prazo vão para um dia ≤ prazo (prazo mais próximo primeiro); atrasadas pegam os primeiros espaços;
+  o que já estava planejado e continua válido não se mexe; o resto preenche as sobras.
+- O plano é sempre uma **proposta** `plan.apply` (lote de movimentos); só você aprova. Movimentos de tarefas que
+  mudaram desde a proposta são pulados; se todos mudaram, a proposta vira `stale`.
+- Roda no primeiro boot/checagem do dia, ao chegar tarefa com prazo em até 3 dias, e quando as folgas mudam.
+  Um plano novo substitui o pendente anterior. `STUDYAGENT_PLANNER=0` desliga.
+- Folgas: você escolhe as datas; **máx. 10 e mín. 4 por mês**. Só podem ser criadas/removidas a partir de amanhã
+  (1 dia de antecedência); remover não pode deixar o mês abaixo de 4. Se algum mês do horizonte tem menos de 4,
+  o planejador propõe (`dayoff.add`) domingos, depois sábados, depois dias do fim do mês.
+- `summary` mostra `programmed` (tarefas abertas) e `programmed_goal` (24).
 
 ## API (socket Unix, `Authorization: Bearer <token>`)
 
@@ -73,6 +92,8 @@ GET  /health  /me  /summary
 GET  /tasks?status=&from=&to=         POST /tasks          (201 cria, 200 atualiza por source_ref)
 POST /tasks/{id}/complete             POST /tasks/{id}/reschedule | /drop     (202, geram proposta)
 GET  /proposals?status=               POST /proposals      POST /proposals/{id}/approve | /reject
+GET  /dayoffs  POST /dayoffs {date}  DELETE /dayoffs/{date}
+GET  /planner/preview                 POST /planner/run
 GET  /events?after=&limit=            GET  /events/stream?after=   (SSE, retoma por Last-Event-ID)
 ```
 
@@ -91,5 +112,5 @@ STUDYAGENT_STATE_DIR=./state STUDYAGENT_SOCKET=/tmp/sa.sock studyagent admin ini
   testado em uma máquina real**; rode `systemd-analyze verify` e, se o serviço não subir, afrouxe as opções de
   endurecimento uma a uma.
 - Tarefa "planejada" (`planned_for`) que não foi feita no dia ainda não conta como atrasada: `late` compara só com `due`.
-  As regras de streak/mínimo diário entram junto com o planejador.
+  Streak/mínimo diário ainda não são calculados no core (o XP do Quickshell os consome dos eventos).
 - `late` e `day` já vêm no evento, mas o XP do Quickshell ainda lê o `[x]` do arquivo (será trocado pelo SSE).

@@ -58,6 +58,14 @@ MIGRATIONS: list[str] = [
         revoked    INTEGER NOT NULL DEFAULT 0
     );
     """,
+    """
+    CREATE TABLE dayoff (                         -- dias de folga escolhidos por você (meta diária menor)
+        date       TEXT PRIMARY KEY,              -- aaaa-mm-dd
+        source     TEXT NOT NULL DEFAULT 'manual',
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    """,
 ]
 
 

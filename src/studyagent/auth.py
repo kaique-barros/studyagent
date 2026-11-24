@@ -8,7 +8,8 @@ from dataclasses import dataclass
 # Escopo -> permissões. Cada módulo recebe um token com o escopo mínimo de que precisa.
 PERMS: dict[str, set[str]] = {
     # você (shell/CLI): cria, conclui, pede mudanças e DECIDE propostas
-    "user": {"tasks:read", "tasks:create", "tasks:complete", "tasks:request", "proposals:read", "proposals:decide", "events:read"},
+    "user": {"tasks:read", "tasks:create", "tasks:complete", "tasks:request", "proposals:read", "proposals:decide", "events:read",
+             "dayoffs:write", "planner:run"},
     # scraper do Moodle: só cria/atualiza tarefas com source=moodle
     "moodle": {"tasks:read", "tasks:create"},
     # planejador/avaliador e leitor de cronogramas: só PROPÕEM

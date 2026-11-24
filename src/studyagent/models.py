@@ -103,5 +103,10 @@ class ProposalIn(BaseModel):
     reason: str | None = None
 
 
+class DayoffIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    date: date
+
+
 class DecideIn(BaseModel):
     model_config = ConfigDict(extra="forbid")

@@ -19,6 +19,10 @@ app = typer.Typer(help="studyagent: cliente da API local e administração do da
 task_app = typer.Typer(help="tarefas", no_args_is_help=True)
 prop_app = typer.Typer(help="propostas pendentes de confirmação", no_args_is_help=True)
 admin_app = typer.Typer(help="administração (rode como o usuário do agente)", no_args_is_help=True)
+dayoff_app = typer.Typer(help="dias de folga (meta menor)", no_args_is_help=True)
+plan_app = typer.Typer(help="planejador", no_args_is_help=True)
+app.add_typer(dayoff_app, name="dayoff")
+app.add_typer(plan_app, name="plan")
 app.add_typer(task_app, name="task")
 app.add_typer(prop_app, name="proposal")
 app.add_typer(admin_app, name="admin")
@@ -103,7 +107,12 @@ def task_drop(task_id: int, reason: Optional[str] = None):
 @prop_app.command("list")
 def prop_list(status: str = "pending"):
     for p in _call("GET", "/proposals", params={"status": status}):
-        typer.echo(f"#{p['id']:<4} {p['kind']:<16} tarefa={p['task_id']} origem={p['source']} {p['payload']}  — {p.get('reason') or ''}")
+        pl = p["payload"]
+        if p["kind"] == "plan.apply":
+            pl = f"{len(pl['moves'])} movimentos (veja `studyagent plan show`)"
+        elif p["kind"] == "dayoff.add":
+            pl = "folgas: " + ", ".join(pl["dates"])
+        typer.echo(f"#{p['id']:<4} {p['kind']:<16} tarefa={p['task_id']} origem={p['source']} {pl}  — {p.get('reason') or ''}")
 
 
 @prop_app.command("approve")
@@ -114,6 +123,48 @@ def prop_approve(pid: int):
 @prop_app.command("reject")
 def prop_reject(pid: int):
     typer.echo(json.dumps(_call("POST", f"/proposals/{pid}/reject"), ensure_ascii=False))
+
+
+@dayoff_app.command("list")
+def dayoff_list():
+    typer.echo("\n".join(_call("GET", "/dayoffs")) or "(nenhuma)")
+
+
+@dayoff_app.command("add")
+def dayoff_add(day: str = typer.Argument(..., help="aaaa-mm-dd (a partir de amanhã)")):
+    r = _call("POST", "/dayoffs", json={"date": day})
+    typer.echo(f"folga em {r['date']}" + ("" if r["added"] else " (já existia)"))
+
+
+@dayoff_app.command("remove")
+def dayoff_remove(day: str):
+    _call("DELETE", f"/dayoffs/{day}")
+    typer.echo(f"folga de {day} removida")
+
+
+@plan_app.command("show")
+def plan_show():
+    """Mostra o plano que o planejador faria agora (não grava nada)."""
+    p = _call("GET", "/planner/preview")
+    typer.echo(f"programadas: {p['programmed']}/{p['programmed_goal']}" + ("" if p["programmed_ok"] else "  (abaixo da meta!)"))
+    for m in p["moves"]:
+        typer.echo(f"  #{m['task_id']:<4} {m['from'] or '-':<10} -> {m['to'] or '-':<10} {m['title']}")
+    if not p["moves"]:
+        typer.echo("  nenhum movimento: o cronograma já está de acordo")
+    for label, key in (("sobrecarga", "overloaded"), ("faltam tarefas", "shortfall")):
+        if p[key]:
+            typer.echo(f"{label}: " + ", ".join(f"{d} ({n})" for d, n in p[key].items()))
+    if p["overdue"]:
+        typer.echo(f"atrasadas: {p['overdue']}")
+    if p["dayoff_suggestions"]:
+        typer.echo("folgas sugeridas: " + ", ".join(p["dayoff_suggestions"]))
+
+
+@plan_app.command("run")
+def plan_run():
+    """Gera as propostas do plano agora (aprove com `studyagent proposal approve`)."""
+    r = _call("POST", "/planner/run")
+    typer.echo(f"{r['moves']} movimentos; propostas criadas: {r['created_proposals'] or 'nenhuma (nada novo)'}")
 
 
 @app.command()
