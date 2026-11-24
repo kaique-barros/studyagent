@@ -235,3 +235,13 @@ def test_projection_shows_planned_day(env):
     pid = env.post(f"/tasks/{t['id']}/reschedule", json={"planned_for": "2026-11-26"}, headers=env.h("user")).json()["id"]
     env.post(f"/proposals/{pid}/approve", headers=env.h("user"))
     assert "- [ ] Trabalho @{2026-11-26}" in env.settings.tasks_file.read_text(encoding="utf-8")
+
+
+def test_projection_replaces_unreadable_file(env):
+    import os
+    p = env.settings.tasks_file
+    mk(env, title="A")
+    os.chmod(p, 0o000)                                 # arquivo ilegível, mas a pasta é nossa
+    mk(env, title="B")
+    os.chmod(p, 0o644) if p.exists() else None
+    assert "- [ ] B" in p.read_text(encoding="utf-8")

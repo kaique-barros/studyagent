@@ -48,7 +48,7 @@ def write(conn: sqlite3.Connection, settings: Settings, now: datetime) -> bool:
     try:
         if path.read_text(encoding="utf-8") == text:
             return False
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".studyagent-", suffix=".tmp")
