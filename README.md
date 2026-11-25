@@ -92,12 +92,32 @@ GET  /health  /me  /summary
 GET  /tasks?status=&from=&to=         POST /tasks          (201 cria, 200 atualiza por source_ref)
 POST /tasks/{id}/complete             POST /tasks/{id}/reschedule | /drop     (202, geram proposta)
 GET  /proposals?status=               POST /proposals      POST /proposals/{id}/approve | /reject
+POST /feedback  (escopo planner)
 GET  /dayoffs  POST /dayoffs {date}  DELETE /dayoffs/{date}
 GET  /planner/preview                 POST /planner/run
 GET  /events?after=&limit=            GET  /events/stream?after=   (SSE, retoma por Last-Event-ID)
 ```
 
 Exemplo: `curl --unix-socket /run/studyagent/api.sock -H "Authorization: Bearer $(cat ~/.config/studyagent/token)" http://x/summary`
+
+## Agente com LLM (Groq)
+
+O agente é um **cliente separado** do daemon (o daemon nem tem acesso à internet: `RestrictAddressFamilies=AF_UNIX`).
+Ele usa o token `planner`, que só lê e **propõe**; nada muda até você aprovar.
+
+```bash
+export GROQ_API_KEY=gsk_...                # opcional: STUDYAGENT_GROQ_MODEL (padrão llama-3.3-70b-versatile)
+studyagent agent evaluate [--force]        # avalia o cronograma: propostas (reschedule/drop) + mensagem
+studyagent agent review [--days 7]         # feedback da semana (sem chave, sai só com os números)
+```
+
+- Avaliação: no máximo 1x por dia; até 5 propostas, só `planned_for` dentro do horizonte e nunca depois do prazo, ou descartar.
+  Tudo que o modelo devolve é validado em código; títulos de tarefas são tratados como dados (injeção de prompt só gera
+  uma proposta que você pode rejeitar).
+- Orçamento do Groq contado localmente (800 req/dia, 150K tokens/dia, prompts ≤ ~7K tokens) em `groq-budget.json`.
+- O texto vai para os eventos (`agent.feedback`, `kind` = `evaluation`|`review`) para o shell mostrar.
+- Timers: `deploy/studyagent-agent.{service,timer}` (04:30 + 3 min após o boot) e `studyagent-review.*` (domingo 20:00).
+  Não testados em systemd real.
 
 ## Desenvolvimento
 

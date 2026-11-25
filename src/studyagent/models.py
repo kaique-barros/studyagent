@@ -103,6 +103,22 @@ class ProposalIn(BaseModel):
     reason: str | None = None
 
 
+class FeedbackIn(BaseModel):
+    """Texto do agente para você (avaliação do cronograma, revisão semanal). Vira um evento `agent.feedback`."""
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["evaluation", "review"]
+    text: str
+    data: dict | None = None
+
+    @field_validator("text")
+    @classmethod
+    def _text(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 4000:
+            raise ValueError("texto vazio ou maior que 4000 caracteres")
+        return v
+
+
 class DayoffIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     date: date

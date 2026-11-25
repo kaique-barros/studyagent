@@ -1,0 +1,12 @@
+# /etc/systemd/system/studyagent-agent.timer — roda todo dia; Persistent=true recupera se o PC estava desligado
+# (o comando em si só avalia 1x por dia, então rodar de novo no boot é inofensivo)
+[Unit]
+Description=studyagent: avaliação diária
+
+[Timer]
+OnCalendar=*-*-* 04:30
+OnBootSec=3min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

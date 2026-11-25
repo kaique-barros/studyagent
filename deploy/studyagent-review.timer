@@ -1,0 +1,10 @@
+# /etc/systemd/system/studyagent-review.timer — revisão semanal (domingo à noite)
+[Unit]
+Description=studyagent: revisão semanal
+
+[Timer]
+OnCalendar=Sun *-*-* 20:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

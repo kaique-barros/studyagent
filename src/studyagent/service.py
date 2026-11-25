@@ -298,6 +298,13 @@ class Service:
         return {"task_id": task["id"]}
 
 
+    # ---------- feedback do agente ----------
+    def add_feedback(self, actor: Actor, kind: str, text: str, data: dict[str, Any] | None) -> int:
+        if not actor.can("feedback:create"):
+            raise Rejected("sem permissão para publicar feedback", 403)
+        with tx(self.conn):
+            return self.emit("agent.feedback", {"kind": kind, "text": text, "data": data or {}, "source": actor.source})
+
     # ---------- folgas ----------
     def dayoffs(self) -> set[str]:
         return {r["date"] for r in self.conn.execute("SELECT date FROM dayoff")}

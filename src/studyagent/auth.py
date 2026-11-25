@@ -13,7 +13,7 @@ PERMS: dict[str, set[str]] = {
     # scraper do Moodle: só cria/atualiza tarefas com source=moodle
     "moodle": {"tasks:read", "tasks:create"},
     # planejador/avaliador e leitor de cronogramas: só PROPÕEM
-    "planner": {"tasks:read", "proposals:create", "events:read"},
+    "planner": {"tasks:read", "proposals:read", "proposals:create", "events:read", "feedback:create"},
     "schedule": {"tasks:read", "proposals:create"},
     # leitura (ex.: widgets que só mostram)
     "viewer": {"tasks:read", "proposals:read", "events:read"},

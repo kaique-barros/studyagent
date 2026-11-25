@@ -23,6 +23,8 @@ dayoff_app = typer.Typer(help="dias de folga (meta menor)", no_args_is_help=True
 plan_app = typer.Typer(help="planejador", no_args_is_help=True)
 app.add_typer(dayoff_app, name="dayoff")
 app.add_typer(plan_app, name="plan")
+agent_app = typer.Typer(help="agente com LLM (Groq): avalia o cronograma e dá feedback; usa o token `planner`", no_args_is_help=True)
+app.add_typer(agent_app, name="agent")
 app.add_typer(task_app, name="task")
 app.add_typer(prop_app, name="proposal")
 app.add_typer(admin_app, name="admin")
@@ -165,6 +167,54 @@ def plan_run():
     """Gera as propostas do plano agora (aprove com `studyagent proposal approve`)."""
     r = _call("POST", "/planner/run")
     typer.echo(f"{r['moves']} movimentos; propostas criadas: {r['created_proposals'] or 'nenhuma (nada novo)'}")
+
+
+def _agent_state_dir() -> Path:
+    sd = os.environ.get("STATE_DIRECTORY")
+    return Path(sd.split(":")[0]) if sd else Path.home() / ".local" / "state" / "studyagent-agent"
+
+
+def _agent_llm():
+    from .llm import LLMError, from_env
+    try:
+        return from_env(_agent_state_dir())
+    except LLMError as e:
+        typer.echo(str(e), err=True); raise typer.Exit(2)
+
+
+@agent_app.command("evaluate")
+def agent_evaluate(force: bool = typer.Option(False, "--force", help="roda mesmo que já tenha rodado hoje")):
+    """Avalia o cronograma e cria propostas (você aprova). Roda no máximo 1x por dia, salvo --force."""
+    from .agent import Api, evaluate
+    from .llm import LLMError
+    stamp = _agent_state_dir() / "last-evaluate"
+    with _client() as c:
+        api = Api(c)
+        today = api.get("/summary")["today"]
+        if not force and stamp.exists() and stamp.read_text().strip() == today:
+            typer.echo("já avaliado hoje (use --force)"); return
+        try:
+            out = evaluate(api, _agent_llm())
+        except LLMError as e:
+            typer.echo(f"erro do LLM: {e}", err=True); raise typer.Exit(1)
+    if "skipped" not in out:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(today)
+    typer.echo(json.dumps(out, indent=2, ensure_ascii=False))
+
+
+@agent_app.command("review")
+def agent_review(days: int = typer.Option(7, help="janela da revisão (7; pode ser 3-4)")):
+    """Feedback da semana (números do próprio daemon + texto do LLM; sem LLM, só os números)."""
+    from .agent import Api, review
+    from .llm import LLMError, from_env
+    try:
+        llm = from_env(_agent_state_dir())
+    except LLMError:
+        llm = None
+    with _client() as c:
+        out = review(Api(c), llm, days)
+    typer.echo(out["text"])
 
 
 @app.command()

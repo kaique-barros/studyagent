@@ -13,7 +13,7 @@ from . import __version__, projection
 from .auth import Actor, authenticate
 from .config import Settings
 from .db import connect, migrate
-from .models import DayoffIn, ProposalIn, ReasonIn, RescheduleIn, TaskIn
+from .models import DayoffIn, FeedbackIn, ProposalIn, ReasonIn, RescheduleIn, TaskIn
 from .service import Clock, Rejected, Service, system_clock
 
 
@@ -161,6 +161,10 @@ def create_app(settings: Settings | None = None, clock: Clock = system_clock) ->
     def planner_run(conn: Conn, actor: Who) -> dict[str, Any]:
         need(actor, "planner:run")
         return svc(conn).plan_run("manual")
+
+    @app.post("/feedback", status_code=201)
+    def feedback(body: FeedbackIn, conn: Conn, actor: Who) -> dict[str, Any]:
+        return {"event_id": svc(conn).add_feedback(actor, body.kind, body.text, body.data)}
 
     # ---------- eventos ----------
     @app.get("/events")

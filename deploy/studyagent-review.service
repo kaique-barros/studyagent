@@ -1,0 +1,27 @@
+# /etc/systemd/system/studyagent-review.service — revisão semanal (feedback)
+# Pré-requisitos:
+#   sudo -u studyagent studyagent admin token-create agent planner --replace --out /etc/studyagent/planner.token
+#   /etc/studyagent/agent.env com a linha:  GROQ_API_KEY=gsk_...   (chmod 640, dono root, grupo studyagent)
+[Unit]
+Description=studyagent: revisão semanal
+After=studyagentd.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=studyagent
+Group=studyagent
+EnvironmentFile=/etc/studyagent/agent.env
+Environment=STUDYAGENT_TOKEN_FILE=/etc/studyagent/planner.token
+Environment=STUDYAGENT_SOCKET=/run/studyagent/api.sock
+StateDirectory=studyagent-agent
+ExecStart=/opt/studyagent/venv/bin/studyagent agent review
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
