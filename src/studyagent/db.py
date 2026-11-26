@@ -66,6 +66,36 @@ MIGRATIONS: list[str] = [
     );
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """,
+    """
+    CREATE TABLE course (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        semester     TEXT NOT NULL,               -- 2026-2
+        key          TEXT NOT NULL,               -- sigla (nome da pasta da matéria)
+        code         TEXT, name TEXT, section TEXT, professor TEXT,
+        source_hash  TEXT,                        -- sha256 do Cronograma.pdf importado por último
+        study_start  TEXT,                        -- aaaa-mm-dd: início do plano de estudo adaptado (vazio = data da aula - study_lead)
+        study_k      REAL NOT NULL DEFAULT 1.0,   -- ritmo: 1 = mesmo espaçamento das aulas; 0.5 = comprime à metade
+        study_lead   INTEGER NOT NULL DEFAULT 5,  -- dias de antecedência do estudo em relação à aula
+        imported_at  TEXT,
+        UNIQUE(semester, key)
+    );
+    CREATE TABLE session (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL REFERENCES course(id) ON DELETE CASCADE,
+        n         INTEGER,
+        date      TEXT NOT NULL,
+        start     TEXT NOT NULL DEFAULT '',
+        end       TEXT NOT NULL DEFAULT '',
+        kind      TEXT NOT NULL,                  -- class | exam | holiday | no_class | empty
+        flag      TEXT,                           -- duvidas | revisao (destacar no calendário)
+        title     TEXT NOT NULL,
+        topic     TEXT,
+        label     TEXT NOT NULL,                  -- texto do calendário: "SIGLA: assunto" ou "SIGLA: vazio"
+        task_id   INTEGER REFERENCES task(id),    -- tarefa de estudo desta aula
+        UNIQUE(course_id, date, start)
+    );
+    CREATE INDEX session_date ON session(date);
+    """,
 ]
 
 

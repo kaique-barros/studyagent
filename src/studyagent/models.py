@@ -74,6 +74,119 @@ class TaskIn(BaseModel):
         return v
 
 
+class SessionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    n: int | None = None
+    date: date
+    start: str = ""
+    end: str = ""
+    kind: Literal["class", "exam", "holiday", "no_class", "empty"]
+    flag: str | None = None
+    title: str
+    topic: str | None = None
+    label: str
+
+    @field_validator("start", "end")
+    @classmethod
+    def _hhmm(cls, v: str) -> str:
+        if v and not re.fullmatch(r"\d{2}:\d{2}", v):
+            raise ValueError("horário deve ser HH:MM")
+        return v
+
+    @field_validator("title", "label")
+    @classmethod
+    def _len(cls, v: str) -> str:
+        if len(v) > 500:
+            raise ValueError("texto longo demais")
+        return v
+
+    @field_validator("topic")
+    @classmethod
+    def _topic(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 3000:
+            raise ValueError("topic longo demais")
+        return v
+
+    @field_validator("flag")
+    @classmethod
+    def _flag(cls, v: str | None) -> str | None:
+        if v is not None and not set(v.split(",")) <= {"duvidas", "revisao"}:
+            raise ValueError("flag inválida")
+        return v
+
+
+class ScheduleImportIn(BaseModel):
+    """Cronograma lido de um PDF (proposta `schedule.import`)."""
+    model_config = ConfigDict(extra="forbid")
+    semester: str
+    key: str
+    code: str | None = None
+    name: str | None = None
+    section: str | None = None
+    professor: str | None = None
+    source_hash: str
+    sessions: list[SessionIn]
+    warnings: list[str] = []
+
+    @field_validator("semester")
+    @classmethod
+    def _sem(cls, v: str) -> str:
+        if not re.fullmatch(r"\d{4}-[12]", v):
+            raise ValueError("semestre deve ser AAAA-S (ex.: 2026-2)")
+        return v
+
+    @field_validator("key")
+    @classmethod
+    def _key(cls, v: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", v):
+            raise ValueError("sigla inválida")
+        return v
+
+    @field_validator("code", "name", "section", "professor")
+    @classmethod
+    def _short(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 200:
+            raise ValueError("texto longo demais")
+        return v
+
+    @field_validator("sessions")
+    @classmethod
+    def _n(cls, v: list[SessionIn]) -> list[SessionIn]:
+        if not (1 <= len(v) <= 250):
+            raise ValueError("entre 1 e 250 linhas de cronograma")
+        return v
+
+    @field_validator("warnings")
+    @classmethod
+    def _w(cls, v: list[str]) -> list[str]:
+        return [x[:300] for x in v[:50]]
+
+
+class ShiftIn(BaseModel):
+    """Adapta o plano de estudo de um semestre (ou de uma matéria) a partir de uma data."""
+    model_config = ConfigDict(extra="forbid")
+    semester: str
+    key: str | None = None
+    start: date | None = None
+    clear: bool = False                 # volta ao modo "data da aula - folga"
+    k: float | None = None
+    lead: int | None = None
+
+    @field_validator("k")
+    @classmethod
+    def _k(cls, v: float | None) -> float | None:
+        if v is not None and not (0.1 <= v <= 3):
+            raise ValueError("k deve estar entre 0.1 e 3")
+        return v
+
+    @field_validator("lead")
+    @classmethod
+    def _lead(cls, v: int | None) -> int | None:
+        if v is not None and not (0 <= v <= 60):
+            raise ValueError("lead deve estar entre 0 e 60 dias")
+        return v
+
+
 class RescheduleIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     due: date | None = None
@@ -95,9 +208,10 @@ class ReasonIn(BaseModel):
 class ProposalIn(BaseModel):
     """Proposta feita por planejador/leitor de cronogramas (ou por você, para mudar prazo/apagar)."""
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["task.create", "task.reschedule", "task.drop"]
+    kind: Literal["task.create", "task.reschedule", "task.drop", "schedule.import"]
     task_id: int | None = None
     task: TaskIn | None = None
+    schedule: ScheduleImportIn | None = None
     due: date | None = None
     planned_for: date | None = None
     reason: str | None = None

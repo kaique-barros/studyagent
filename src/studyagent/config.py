@@ -33,6 +33,8 @@ class Settings:
     lane_done: str = field(default_factory=lambda: os.environ.get("STUDYAGENT_LANE_DONE", "Concluído"))
     done_visible_days: int = 14               # concluídas aparecem na coluna "Concluído" por tantos dias
     day_start_hour: int = 4                   # o "dia" vira às 04:00
+    # cronogramas (lidos pelo CLI, não pelo daemon): <raiz>/<AAAA-S>/Matérias/<Sigla>/Cronograma.pdf
+    schedule_root: Path = field(default_factory=lambda: Path(os.path.expanduser(os.environ.get("STUDYAGENT_SCHEDULE_ROOT", "~/Obsidian Vault/UFMG"))))
     # planejador
     planner_enabled: bool = field(default_factory=lambda: os.environ.get("STUDYAGENT_PLANNER", "1") != "0")
     daily_target: int = 4                     # tarefas por dia

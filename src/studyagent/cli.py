@@ -24,7 +24,9 @@ plan_app = typer.Typer(help="planejador", no_args_is_help=True)
 app.add_typer(dayoff_app, name="dayoff")
 app.add_typer(plan_app, name="plan")
 agent_app = typer.Typer(help="agente com LLM (Groq): avalia o cronograma e dá feedback; usa o token `planner`", no_args_is_help=True)
+schedule_app = typer.Typer(help="cronogramas de aula (PDF) -> matérias, calendário e tarefas de estudo", no_args_is_help=True)
 app.add_typer(agent_app, name="agent")
+app.add_typer(schedule_app, name="schedule")
 app.add_typer(task_app, name="task")
 app.add_typer(prop_app, name="proposal")
 app.add_typer(admin_app, name="admin")
@@ -114,6 +116,11 @@ def prop_list(status: str = "pending"):
             pl = f"{len(pl['moves'])} movimentos (veja `studyagent plan show`)"
         elif p["kind"] == "dayoff.add":
             pl = "folgas: " + ", ".join(pl["dates"])
+        elif p["kind"] == "schedule.import":
+            kinds: dict[str, int] = {}
+            for x in pl["sessions"]:
+                kinds[x["kind"]] = kinds.get(x["kind"], 0) + 1
+            pl = f"{pl['key']} {pl['semester']}: {kinds}" + (f" ⚠ {len(pl['warnings'])} aviso(s)" if pl["warnings"] else "")
         typer.echo(f"#{p['id']:<4} {p['kind']:<16} tarefa={p['task_id']} origem={p['source']} {pl}  — {p.get('reason') or ''}")
 
 
@@ -215,6 +222,101 @@ def agent_review(days: int = typer.Option(7, help="janela da revisão (7; pode s
     with _client() as c:
         out = review(Api(c), llm, days)
     typer.echo(out["text"])
+
+
+def _schedule_llm():
+    from .llm import LLMError, from_env
+    try:
+        return from_env(_agent_state_dir())
+    except LLMError:
+        return None                                   # sem chave: só o leitor de tabelas
+
+
+def _print_result(r: dict) -> None:
+    if "error" in r:
+        typer.echo(f"✗ {r['semester']}/{r['key']}: {r['error']}", err=True); return
+    typer.echo(f"✓ {r['semester']}/{r['key']}: proposta #{r['proposal']} ({r['sessions']} linhas {r['kinds']}, via {r['method']})")
+    for w in r["warnings"]:
+        typer.echo(f"    ⚠ {w}")
+
+
+@schedule_app.command("import")
+def schedule_import(pdf: Path, semester: Optional[str] = typer.Option(None, help="AAAA-S; padrão: vem do caminho"),
+                    key: Optional[str] = typer.Option(None, help="sigla; padrão: vem do caminho")):
+    """Lê um Cronograma.pdf e cria a proposta de importação (você aprova depois)."""
+    from .schedule import semester_key_from_path
+    from .schedule_scan import propose
+    guess = semester_key_from_path(pdf)
+    semester, key = semester or (guess[0] if guess else None), key or (guess[1] if guess else None)
+    if not semester or not key:
+        typer.echo("não consegui deduzir semestre/sigla do caminho: use --semester e --key", err=True); raise typer.Exit(2)
+    with _client() as c:
+        try:
+            _print_result(propose(c, pdf, semester, key, _schedule_llm()))
+        except Exception as e:
+            typer.echo(f"erro: {e}", err=True); raise typer.Exit(1)
+
+
+@schedule_app.command("scan")
+def schedule_scan_cmd(root: Optional[Path] = typer.Option(None, help="padrão: STUDYAGENT_SCHEDULE_ROOT ou ~/Obsidian Vault/UFMG")):
+    """Procura Cronograma.pdf novos ou alterados e cria as propostas."""
+    from .schedule_scan import scan
+    root = root or Settings().schedule_root
+    if not root.is_dir():
+        typer.echo(f"pasta não encontrada: {root}", err=True); raise typer.Exit(2)
+    with _client() as c:
+        res = scan(c, root, _schedule_llm())
+    for r in res:
+        _print_result(r)
+    typer.echo(f"{len(res)} cronograma(s) novo(s) ou alterado(s)" if res else "nada novo")
+
+
+@schedule_app.command("watch")
+def schedule_watch(root: Optional[Path] = None, interval: int = typer.Option(300, help="segundos entre varreduras")):
+    """Fica vigiando a pasta (hash do PDF muda -> nova proposta)."""
+    import time
+    from .schedule_scan import scan
+    root = root or Settings().schedule_root
+    failed: set[str] = set()
+    typer.echo(f"vigiando {root} a cada {interval}s")
+    while True:
+        try:
+            with _client() as c:
+                for r in scan(c, root, _schedule_llm(), failed):
+                    _print_result(r)
+        except (httpx.TransportError, OSError) as e:
+            typer.echo(f"aguardando o daemon/pasta: {e}", err=True)
+        time.sleep(interval)
+
+
+@schedule_app.command("courses")
+def schedule_courses():
+    for c in _call("GET", "/courses"):
+        mode = f"início {c['study_start']} k={c['study_k']}" if c["study_start"] else f"aula − {c['study_lead']} dias"
+        typer.echo(f"{c['semester']}  {c['key']:<8} {c['name'] or '-':<36} estudo: {mode}")
+
+
+@schedule_app.command("calendar")
+def schedule_calendar(date_from: Optional[str] = typer.Option(None, "--from"), date_to: Optional[str] = typer.Option(None, "--to"),
+                      course: Optional[str] = None):
+    params = {k: v for k, v in {"from": date_from, "to": date_to, "course": course}.items() if v}
+    for s in _call("GET", "/calendar", params=params):
+        mark = "★" if s["highlight"] else " "
+        typer.echo(f"{mark} {s['date']} {s['start'] or '     '}  {s['label']}" + (f"  [{s['flag']}]" if s["flag"] else ""))
+
+
+@schedule_app.command("shift")
+def schedule_shift(semester: str, start: Optional[str] = typer.Option(None, help="aaaa-mm-dd: dia em que a 1ª aula de cada matéria passa a ser estudada"),
+                   course: Optional[str] = typer.Option(None, help="só esta sigla"), k: Optional[float] = typer.Option(None, help="ritmo (1 = igual ao semestre)"),
+                   lead: Optional[int] = typer.Option(None, help="dias de antecedência (sem --start)"),
+                   clear: bool = typer.Option(False, "--clear", help="volta a 'data da aula − folga'")):
+    """Adapta os prazos dos estudos de um semestre a partir de uma data (ex.: começar o próximo semestre antes)."""
+    body = {k_: v for k_, v in {"semester": semester, "key": course, "start": start, "k": k, "lead": lead}.items() if v is not None}
+    if clear:
+        body["clear"] = True
+    r = _call("POST", "/schedule/shift", json=body)
+    for c in r["courses"]:
+        typer.echo(f"{c['course']}: {c['tasks_moved']} prazos ajustados (início {c['study_start'] or '—'}, k={c['k']}, folga {c['lead']})")
 
 
 @app.command()

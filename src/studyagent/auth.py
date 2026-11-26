@@ -9,12 +9,12 @@ from dataclasses import dataclass
 PERMS: dict[str, set[str]] = {
     # você (shell/CLI): cria, conclui, pede mudanças e DECIDE propostas
     "user": {"tasks:read", "tasks:create", "tasks:complete", "tasks:request", "proposals:read", "proposals:decide", "events:read",
-             "dayoffs:write", "planner:run"},
+             "dayoffs:write", "planner:run", "schedule:shift"},
     # scraper do Moodle: só cria/atualiza tarefas com source=moodle
     "moodle": {"tasks:read", "tasks:create"},
     # planejador/avaliador e leitor de cronogramas: só PROPÕEM
     "planner": {"tasks:read", "proposals:read", "proposals:create", "events:read", "feedback:create"},
-    "schedule": {"tasks:read", "proposals:create"},
+    "schedule": {"tasks:read", "proposals:read", "proposals:create"},
     # leitura (ex.: widgets que só mostram)
     "viewer": {"tasks:read", "proposals:read", "events:read"},
 }

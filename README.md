@@ -93,6 +93,7 @@ GET  /tasks?status=&from=&to=         POST /tasks          (201 cria, 200 atuali
 POST /tasks/{id}/complete             POST /tasks/{id}/reschedule | /drop     (202, geram proposta)
 GET  /proposals?status=               POST /proposals      POST /proposals/{id}/approve | /reject
 POST /feedback  (escopo planner)
+GET  /courses  /calendar?from=&to=&course=     POST /schedule/shift
 GET  /dayoffs  POST /dayoffs {date}  DELETE /dayoffs/{date}
 GET  /planner/preview                 POST /planner/run
 GET  /events?after=&limit=            GET  /events/stream?after=   (SSE, retoma por Last-Event-ID)
@@ -118,6 +119,35 @@ studyagent agent review [--days 7]         # feedback da semana (sem chave, sai 
 - O texto vai para os eventos (`agent.feedback`, `kind` = `evaluation`|`review`) para o shell mostrar.
 - Timers: `deploy/studyagent-agent.{service,timer}` (04:30 + 3 min após o boot) e `studyagent-review.*` (domingo 20:00).
   Não testados em systemd real.
+
+## Cronogramas de aula (PDF)
+
+Pasta esperada: `<raiz>/<AAAA-S>/Matérias/<Sigla>/Cronograma.pdf` (padrão da raiz: `~/Obsidian Vault/UFMG`, ou
+`STUDYAGENT_SCHEDULE_ROOT`). O semestre e a sigla vêm do caminho. Precisa de um token de escopo `schedule`.
+
+```bash
+studyagent schedule scan                  # lê os PDFs novos/alterados (hash) e cria propostas schedule.import
+studyagent schedule watch                 # o mesmo, em loop (a cada 5 min); veja deploy/studyagent-schedule.service
+studyagent schedule import caminho.pdf    # um arquivo só
+studyagent proposal list                  # mostra o resumo e os avisos de cada cronograma
+studyagent proposal approve N             # só então viram matéria, calendário e tarefas
+studyagent schedule courses | calendar [--from --to --course]
+studyagent schedule shift 2027-1 --start 2026-12-05 [--k 1] [--course SIGLA] | --clear
+```
+
+- **Leitura:** as tabelas do PDF (pdfplumber) são lidas pelo cabeçalho (Aula, Data, Dia, Horário, Assunto/Conteúdo);
+  funciona para o Diário de Classe da UFMG e para tabelas de professores (datas sem ano usam o semestre da pasta; o
+  horário pode vir do cabeçalho do documento). Sem nenhuma tabela, e com `GROQ_API_KEY`, o texto vai ao Groq em pedaços e a
+  resposta é validada. Conferências: dia da semana × data, sequência das aulas, janela do semestre.
+- **Calendário** (`session`): cada linha vira `class`, `exam`, `holiday`, `no_class` ou `empty` (rótulo "SIGLA: vazio"
+  ou o texto do PDF). Aulas de revisão/dúvidas ficam com `flag` e `highlight` (junto com provas, feriados e dias sem aula).
+- **Tarefas de estudo:** toda aula (`class`) vira uma tarefa `study` (`source=schedule`, `course=SIGLA`) com **prazo
+  fixo = data da aula − 5 dias** (atrasar tem a penalidade normal). Provas, feriados e linhas vazias não geram tarefa.
+  A avaliação (pontos, testes do Moodle, VPLs, checkpoints) é ignorada de propósito: vem do Moodle ou é manual.
+- **Adaptar datas** (`schedule shift`): a 1ª aula de cada matéria passa a ser estudada em `--start` e as demais mantêm o
+  espaçamento × `k` (0,5 = comprime à metade). Muda só os prazos das tarefas abertas; as datas do calendário não mudam.
+- **Reimportar** um PDF alterado atualiza prazos e títulos, remove aulas que sumiram (a tarefa aberta é descartada) e
+  nunca mexe em tarefas concluídas.
 
 ## Desenvolvimento
 

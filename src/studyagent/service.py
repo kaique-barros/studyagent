@@ -11,6 +11,7 @@ from .config import Settings
 from .db import tx
 from .models import ProposalIn, RescheduleIn, TaskIn
 from .planner import PlanConfig, make_plan, suggest_dayoffs
+from .schedule import study_due
 
 Clock = Callable[[], datetime]
 
@@ -205,6 +206,10 @@ class Service:
             kind = self._kind_for(actor, p.task)
             self._check_dates(p.task.due, p.task.planned_for)
             payload = {**p.task.model_dump(mode="json"), "kind": kind}
+        elif p.kind == "schedule.import":
+            if p.schedule is None:
+                raise Rejected("schedule.import exige o campo 'schedule'")
+            payload = p.schedule.model_dump(mode="json")
         else:
             if p.task_id is None:
                 raise Rejected(f"{p.kind} exige 'task_id'")
@@ -220,6 +225,10 @@ class Service:
                     raise Rejected("o prazo de tarefas do Moodle vem do Moodle; mude 'planned_for'", 403)
                 payload = {"due": _d(r.due), "planned_for": _d(r.planned_for)}
         with tx(self.conn):
+            if p.kind == "schedule.import":                 # um cronograma novo da mesma matéria substitui o pendente
+                for old in self.list_proposals("pending"):
+                    if old["kind"] == "schedule.import" and (old["payload"]["semester"], old["payload"]["key"]) == (payload["semester"], payload["key"]):
+                        self.conn.execute("UPDATE proposal SET status='stale', decided_at=?, result='substituída por um cronograma mais novo' WHERE id=?", (self.now(), old["id"]))
             cur = self.conn.execute(
                 "INSERT INTO proposal(source, kind, payload, reason, task_id, task_version, created_at) VALUES (?,?,?,?,?,?,?)",
                 (actor.source if actor.scope != "user" else "manual", p.kind, json.dumps(payload, ensure_ascii=False), p.reason, task_id, task_version, self.now()),
@@ -258,10 +267,14 @@ class Service:
             out = self.get_proposal(pid)
         if prop["kind"] == "task.create" and result.get("task_id"):
             self._near_due_trigger(self.get_task(result["task_id"]))
+        elif prop["kind"] == "schedule.import":
+            self._replan("cronograma")
         return out
 
     def _apply(self, prop: dict[str, Any]) -> dict[str, Any]:
         k, payload = prop["kind"], prop["payload"]
+        if k == "schedule.import":
+            return self._apply_schedule(payload)
         if k == "plan.apply":
             return self._apply_plan(payload)
         if k == "dayoff.add":
@@ -462,6 +475,156 @@ class Service:
             raise Rejected("todas as tarefas do plano mudaram desde a proposta")
         self.emit("plan.applied", {"applied": applied, "skipped": skipped})
         return {"applied": applied, "skipped": skipped}
+
+    # ---------- cronogramas (matérias e aulas) ----------
+    def list_courses(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self.conn.execute("SELECT * FROM course ORDER BY semester DESC, key")]
+
+    def calendar(self, date_from: str | None = None, date_to: str | None = None, key: str | None = None) -> list[dict[str, Any]]:
+        sql = ("SELECT s.*, c.key AS course, c.semester FROM session s JOIN course c ON c.id=s.course_id WHERE 1=1")
+        args: list[Any] = []
+        if date_from:
+            sql += " AND s.date >= ?"; args.append(date_from)
+        if date_to:
+            sql += " AND s.date <= ?"; args.append(date_to)
+        if key:
+            sql += " AND c.key = ?"; args.append(key)
+        sql += " ORDER BY s.date, s.start, c.key"
+        out = []
+        for r in self.conn.execute(sql, args):
+            d = dict(r)
+            d["highlight"] = d["kind"] in ("exam", "holiday", "no_class") or bool(d["flag"])
+            out.append(d)
+        return out
+
+    @staticmethod
+    def _study_title(s: dict[str, Any]) -> str:
+        t = " ".join((s.get("title") or s.get("topic") or "aula").split()).replace("#", "").replace("@{", "@")
+        base = f"Estudar: {t}"
+        return base if len(base) <= 200 else base[:197].rstrip() + "..."
+
+    def _ensure_study_task(self, course: dict[str, Any], s: dict[str, Any], first: str, seen: set[str]) -> tuple[int, str]:
+        ref = f"{course['semester']}:{course['key']}:" + (str(s["n"]) if s.get("n") is not None else f"d{s['date']}")
+        if ref in seen:
+            ref += ":" + s["date"]
+        seen.add(ref)
+        due = study_due(s["date"], first, course["study_lead"], course["study_start"], course["study_k"])
+        title = self._study_title(s)
+        now = self.now()
+        ex = self.conn.execute("SELECT * FROM task WHERE source='schedule' AND source_ref=?", (ref,)).fetchone()
+        if ex is None:
+            cur = self.conn.execute(
+                "INSERT INTO task(title, course, due, kind, source, source_ref, created_at, updated_at) VALUES (?,?,?,'study','schedule',?,?,?)",
+                (title, course["key"], due, ref, now, now))
+            tid = int(cur.lastrowid)
+            self.emit("task.created", {"task_id": tid, "title": title, "source": "schedule", "due": due})
+            return tid, "created"
+        if ex["status"] == "open" and (ex["title"], ex["due"], ex["course"]) != (title, due, course["key"]):
+            self.conn.execute("UPDATE task SET title=?, due=?, course=?, updated_at=? WHERE id=?", (title, due, course["key"], now, ex["id"]))
+            self.emit("task.updated", {"task_id": ex["id"], "source": "schedule", "changed": {"due": {"from": ex["due"], "to": due}}})
+            return ex["id"], "updated"
+        return ex["id"], "same"
+
+    def _apply_schedule(self, p: dict[str, Any]) -> dict[str, Any]:
+        now = self.now()
+        sem, key = p["semester"], p["key"]
+        row = self.conn.execute("SELECT * FROM course WHERE semester=? AND key=?", (sem, key)).fetchone()
+        if row is None:
+            cur = self.conn.execute(
+                "INSERT INTO course(semester, key, code, name, section, professor, source_hash, imported_at) VALUES (?,?,?,?,?,?,?,?)",
+                (sem, key, p.get("code"), p.get("name"), p.get("section"), p.get("professor"), p["source_hash"], now))
+            cid = int(cur.lastrowid)
+        else:
+            cid = row["id"]
+            self.conn.execute("UPDATE course SET code=?, name=?, section=?, professor=?, source_hash=?, imported_at=? WHERE id=?",
+                              (p.get("code"), p.get("name"), p.get("section"), p.get("professor"), p["source_hash"], now, cid))
+        course = dict(self.conn.execute("SELECT * FROM course WHERE id=?", (cid,)).fetchone())
+        sessions = [dict(s) for s in p["sessions"]]
+        classes = [s["date"] for s in sessions if s["kind"] == "class"]
+        first = min(classes) if classes else None
+        existing = {(r["date"], r["start"]): dict(r) for r in self.conn.execute("SELECT * FROM session WHERE course_id=?", (cid,))}
+        seen_keys: set[tuple[str, str]] = set()
+        seen_refs: set[str] = set()
+        linked: set[int] = set()                                  # tarefas que continuam ligadas a alguma aula (mesmo que a data tenha mudado)
+        stats = {"created": 0, "updated": 0, "tasks_created": 0, "tasks_updated": 0, "removed": 0, "tasks_dropped": 0}
+        for s in sessions:
+            k = (s["date"], s.get("start") or "")
+            if k in seen_keys:
+                continue
+            seen_keys.add(k)
+            task_id = None
+            old = existing.get(k)
+            if s["kind"] == "class" and first:
+                task_id, what = self._ensure_study_task(course, s, first, seen_refs)
+                linked.add(task_id)
+                if what == "created":
+                    stats["tasks_created"] += 1
+                elif what == "updated":
+                    stats["tasks_updated"] += 1
+            elif old and old["task_id"] and old["task_id"] not in linked:
+                self._drop_open_task(old["task_id"], stats)       # a linha deixou de ser aula: a tarefa aberta cai
+            vals = (s.get("n"), s.get("end") or "", s["kind"], s.get("flag"), s["title"], s.get("topic"), s["label"], task_id)
+            if old:
+                self.conn.execute("UPDATE session SET n=?, end=?, kind=?, flag=?, title=?, topic=?, label=?, task_id=? WHERE id=?", (*vals, old["id"]))
+                stats["updated"] += 1
+            else:
+                self.conn.execute(
+                    "INSERT INTO session(course_id, date, start, n, end, kind, flag, title, topic, label, task_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (cid, s["date"], s.get("start") or "", *vals))
+                stats["created"] += 1
+        for k, old in existing.items():
+            if k not in seen_keys:
+                if old["task_id"] and old["task_id"] not in linked:
+                    self._drop_open_task(old["task_id"], stats)
+                self.conn.execute("DELETE FROM session WHERE id=?", (old["id"],))
+                stats["removed"] += 1
+        self.emit("schedule.imported", {"semester": sem, "key": key, "sessions": len(seen_keys), **stats, "warnings": p.get("warnings", [])[:10]})
+        return {"course": key, "semester": sem, "sessions": len(seen_keys), **stats}
+
+    def _drop_open_task(self, task_id: int, stats: dict[str, int]) -> None:
+        t = self.conn.execute("SELECT * FROM task WHERE id=?", (task_id,)).fetchone()
+        if t and t["status"] == "open":
+            self.conn.execute("UPDATE task SET status='dropped', updated_at=? WHERE id=?", (self.now(), task_id))
+            self.emit("task.dropped", {"task_id": task_id, "title": t["title"]})
+            stats["tasks_dropped"] += 1
+
+    def shift_schedule(self, actor: Actor, semester: str, key: str | None, start: date | None, clear: bool,
+                       k: float | None, lead: int | None) -> dict[str, Any]:
+        """Adapta os PRAZOS dos estudos (não as aulas): a 1ª aula de cada matéria passa a cair em `start`, mantendo o
+        espaçamento (x k). Sem `start`, usa data da aula - folga. Tarefas já concluídas não mudam."""
+        if not actor.can("schedule:shift"):
+            raise Rejected("só o usuário adapta o plano de estudo", 403)
+        changed = []
+        with tx(self.conn):
+            sql, args = "SELECT * FROM course WHERE semester=?", [semester]
+            if key:
+                sql += " AND key=?"; args.append(key)
+            courses = [dict(r) for r in self.conn.execute(sql, args)]
+            if not courses:
+                raise Rejected("matéria/semestre não encontrado", 404)
+            if start is not None:
+                self._check_dates(start, None)
+            for c in courses:
+                new_start = None if clear else (start.isoformat() if start else c["study_start"])
+                new_k = k if k is not None else c["study_k"]
+                new_lead = lead if lead is not None else c["study_lead"]
+                self.conn.execute("UPDATE course SET study_start=?, study_k=?, study_lead=? WHERE id=?", (new_start, new_k, new_lead, c["id"]))
+                c.update(study_start=new_start, study_k=new_k, study_lead=new_lead)
+                rows = self.conn.execute(
+                    "SELECT s.date, t.id AS tid, t.due, t.status FROM session s JOIN task t ON t.id=s.task_id "
+                    "WHERE s.course_id=? AND s.kind='class' ORDER BY s.date", (c["id"],)).fetchall()
+                if not rows:
+                    continue
+                first, n = rows[0]["date"], 0
+                for r in rows:
+                    due = study_due(r["date"], first, new_lead, new_start, new_k)
+                    if r["status"] == "open" and r["due"] != due:
+                        self.conn.execute("UPDATE task SET due=?, updated_at=? WHERE id=?", (due, self.now(), r["tid"]))
+                        n += 1
+                changed.append({"course": c["key"], "tasks_moved": n, "study_start": new_start, "k": new_k, "lead": new_lead})
+            self.emit("schedule.shifted", {"semester": semester, "courses": changed})
+        self._replan("plano de estudo adaptado")
+        return {"semester": semester, "courses": changed}
 
 
 def _d(d: date | None) -> str | None:

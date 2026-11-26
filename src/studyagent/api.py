@@ -13,7 +13,7 @@ from . import __version__, projection
 from .auth import Actor, authenticate
 from .config import Settings
 from .db import connect, migrate
-from .models import DayoffIn, FeedbackIn, ProposalIn, ReasonIn, RescheduleIn, TaskIn
+from .models import DayoffIn, FeedbackIn, ShiftIn, ProposalIn, ReasonIn, RescheduleIn, TaskIn
 from .service import Clock, Rejected, Service, system_clock
 
 
@@ -161,6 +161,25 @@ def create_app(settings: Settings | None = None, clock: Clock = system_clock) ->
     def planner_run(conn: Conn, actor: Who) -> dict[str, Any]:
         need(actor, "planner:run")
         return svc(conn).plan_run("manual")
+
+    # ---------- matérias, calendário e plano de estudo ----------
+    @app.get("/courses")
+    def courses(conn: Conn, actor: Who) -> list[dict[str, Any]]:
+        need(actor, "tasks:read")
+        return svc(conn).list_courses()
+
+    @app.get("/calendar")
+    def calendar(conn: Conn, actor: Who, course: str | None = None,
+                 date_from: Annotated[str | None, Query(alias="from")] = None,
+                 date_to: Annotated[str | None, Query(alias="to")] = None) -> list[dict[str, Any]]:
+        need(actor, "tasks:read")
+        return svc(conn).calendar(date_from, date_to, course)
+
+    @app.post("/schedule/shift")
+    def shift(body: ShiftIn, conn: Conn, actor: Who) -> dict[str, Any]:
+        out = svc(conn).shift_schedule(actor, body.semester, body.key, body.start, body.clear, body.k, body.lead)
+        sync_projection(conn)
+        return out
 
     @app.post("/feedback", status_code=201)
     def feedback(body: FeedbackIn, conn: Conn, actor: Who) -> dict[str, Any]:

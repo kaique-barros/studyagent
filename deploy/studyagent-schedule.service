@@ -1,0 +1,20 @@
+# ~/.config/systemd/user/studyagent-schedule.service — vigia os Cronograma.pdf do vault (roda como VOCÊ, não como studyagent)
+# Pré-requisitos:
+#   sudo -u studyagent studyagent admin token-create schedule schedule --replace --out /etc/studyagent/schedule.token
+#   (o arquivo precisa ser legível por você: chmod 640 e grupo seu, ou grave em ~/.config/studyagent/schedule.token)
+# Ativar:  systemctl --user enable --now studyagent-schedule.service
+[Unit]
+Description=studyagent: leitor de cronogramas (PDF -> propostas)
+
+[Service]
+Type=simple
+Environment=STUDYAGENT_TOKEN_FILE=%h/.config/studyagent/schedule.token
+Environment=STUDYAGENT_SOCKET=/run/studyagent/api.sock
+Environment="STUDYAGENT_SCHEDULE_ROOT=%h/Obsidian Vault/UFMG"
+# opcional (fallback com LLM para PDFs sem tabela): EnvironmentFile=%h/.config/studyagent/agent.env
+ExecStart=/opt/studyagent/venv/bin/studyagent schedule watch --interval 300
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
