@@ -29,9 +29,16 @@ def propose(client: httpx.Client, path: Path, semester: str, key: str, llm: Any 
 
 def known_hashes(client: httpx.Client) -> set[str]:
     """Hashes já importados ou já propostos (pendentes): não precisam ser reprocessados."""
-    r = client.get("/courses"); r.raise_for_status()
+    r = client.get("/courses")
+    if r.status_code == 404:
+        raise RuntimeError("o daemon em execução é uma versão antiga (sem /courses): reinicie o `studyagent serve`")
+    if r.status_code >= 400:
+        raise RuntimeError(f"o daemon recusou a consulta ({r.status_code}): {r.text[:200]}")
     out = {c["source_hash"] for c in r.json() if c.get("source_hash")}
-    r = client.get("/proposals", params={"status": "pending"}); r.raise_for_status()
+    r = client.get("/proposals", params={"status": "pending"})
+    if r.status_code >= 400:
+        raise RuntimeError(f"o daemon recusou a consulta ({r.status_code}): {r.json().get('detail', r.text)}. "
+                           "Se o token foi criado antes desta versão, reinicie o `studyagent serve`")
     for p in r.json():
         if p["kind"] == "schedule.import":
             out.add(p["payload"]["source_hash"])

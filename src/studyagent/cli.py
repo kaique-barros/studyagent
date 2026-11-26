@@ -265,7 +265,10 @@ def schedule_scan_cmd(root: Optional[Path] = typer.Option(None, help="padrão: S
     if not root.is_dir():
         typer.echo(f"pasta não encontrada: {root}", err=True); raise typer.Exit(2)
     with _client() as c:
-        res = scan(c, root, _schedule_llm())
+        try:
+            res = scan(c, root, _schedule_llm())
+        except RuntimeError as e:
+            typer.echo(f"erro: {e}", err=True); raise typer.Exit(1)
     for r in res:
         _print_result(r)
     typer.echo(f"{len(res)} cronograma(s) novo(s) ou alterado(s)" if res else "nada novo")
