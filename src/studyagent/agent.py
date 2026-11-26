@@ -26,10 +26,15 @@ Recebe o cronograma já calculado por um planejador determinístico (4 tarefas p
 se está saudável: sobrecarga perto de prazos, tarefas atrasadas, dias vazios, matérias concentradas num só dia.
 Formato:
 {"message": "avaliação em português, até 500 caracteres",
- "proposals": [{"kind": "task.reschedule", "task_id": 1, "planned_for": "AAAA-MM-DD", "reason": "curto"},
-               {"kind": "task.drop", "task_id": 2, "reason": "curto"}]}
+ "proposals": [{"kind": "task.reschedule", "task_id": <id>, "planned_for": "<AAAA-MM-DD>", "reason": "<motivo em até 15 palavras, específico>"},
+               {"kind": "task.drop", "task_id": <id>, "reason": "<motivo em até 15 palavras, específico>"}]}
 Regras: no máximo 5 propostas; só tarefas listadas; planned_for dentro do horizonte e nunca depois do prazo;
-proponha apenas o que realmente melhora o cronograma; lista vazia é uma boa resposta."""
+proponha apenas o que realmente melhora o cronograma; lista vazia é uma boa resposta.
+Tarefa com "plano_proposto" já tem um dia sugerido aguardando a aprovação do estudante: não a trate como "sem data" nem proponha mudar.
+"shortfall" (dias com menos tarefas que a meta) é NORMAL quando há poucas tarefas abertas: não comente nem proponha nada por isso.
+Não repita o que o planejador já faz (distribuir tarefas pelos dias); olhe para o que ele não enxerga:
+muitas tarefas da mesma matéria no mesmo dia, tarefas pesadas coladas ao prazo, tarefa antiga parada.
+Se o cronograma está bom, diga isso em uma frase e devolva "proposals": []."""
 
 SYSTEM_REVIEW = """Você é a secretaria de estudos de um estudante universitário. Responda SOMENTE com JSON:
 {"message": "feedback da semana em português, até 700 caracteres: o que foi bem, o que escorregou, uma sugestão concreta"}
@@ -55,7 +60,7 @@ def _short(s: str, n: int = 80) -> str:
     return " ".join(s.split())[:n]
 
 
-def _context(api: Api) -> dict[str, Any]:
+def _context(api: Api, proposed: dict[int, str | None] | None = None) -> dict[str, Any]:
     summary = api.get("/summary")
     today = summary["today"]
     tasks = api.get("/tasks", status="open")
@@ -68,18 +73,28 @@ def _context(api: Api) -> dict[str, Any]:
         "dayoffs": [d for d in api.get("/dayoffs") if today <= d <= horizon_end],
         "stats": {k: preview.get(k) for k in ("overloaded", "shortfall", "overdue", "planned_after_due")},
         "tasks": [{"id": t["id"], "title": _short(t["title"]), "course": t["course"], "due": t["due"],
-                   "planned_for": t["planned_for"], "source": t["source"]} for t in shown],
+                   "planned_for": t["planned_for"], "source": t["source"],
+                   **({"plano_proposto": proposed[t["id"]]} if proposed and t["id"] in proposed else {})} for t in shown],
         "tasks_not_shown": max(0, len(tasks) - len(shown)),
     }
 
 
 def evaluate(api: Api, llm: GroqClient) -> dict[str, Any]:
-    ctx = _context(api)
+    pending: set[int] = set()
+    proposed: dict[int, str | None] = {}
+    for p in api.get("/proposals", status="pending"):          # tarefas que já têm proposta (inclusive dentro de um plano em lote)
+        if p["task_id"]:
+            pending.add(p["task_id"])
+            if p["kind"] == "task.reschedule" and p["payload"].get("planned_for"):
+                proposed[p["task_id"]] = p["payload"]["planned_for"]
+        if p["kind"] == "plan.apply":
+            for m in p["payload"].get("moves", []):
+                pending.add(m["task_id"]); proposed[m["task_id"]] = m["to"]
+    ctx = _context(api, proposed)
     if ctx["open_total"] == 0:
         return {"skipped": "sem tarefas abertas"}
     raw = llm.chat_json(SYSTEM_EVAL, json.dumps(ctx, ensure_ascii=False), max_tokens=900)
     tasks = {t["id"]: t for t in ctx["tasks"]}
-    pending = {p["task_id"] for p in api.get("/proposals", status="pending") if p["task_id"]}
     sent, discarded = [], []
     for item in (raw.get("proposals") or [])[:MAX_PROPOSALS * 2]:
         if len(sent) >= MAX_PROPOSALS:
