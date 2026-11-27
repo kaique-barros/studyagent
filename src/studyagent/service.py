@@ -11,6 +11,7 @@ from .config import Settings
 from .db import tx
 from .models import ProposalIn, RescheduleIn, TaskIn
 from .planner import PlanConfig, make_plan, suggest_dayoffs
+from .progress import Completion, DaySnap, ProgressConfig, compute as compute_progress
 from .schedule import study_due
 
 Clock = Callable[[], datetime]
@@ -187,12 +188,16 @@ class Service:
             now = self.clock()
             day = day_key(now, self.settings.day_start_hour)
             late = bool(task["due"]) and task["due"] < day
-            self.conn.execute("UPDATE task SET status='done', done_at=?, updated_at=? WHERE id=?", (iso(now), iso(now), task_id))
+            spent = task["spent_seconds"] + self._running_seconds(task, now)
+            self.conn.execute("UPDATE task SET status='done', done_at=?, updated_at=?, started_at=NULL, spent_seconds=? WHERE id=?",
+                              (iso(now), iso(now), spent, task_id))
             self.emit("task.completed", {
                 "task_id": task_id, "title": task["title"], "due": task["due"], "tag": task["tag"], "kind": task["kind"],
                 "course": task["course"], "day": day, "late": late, "verification": task["verification"],
+                "spent_seconds": spent,
             })
-            return self.get_task(task_id)
+        self.progress_sync()
+        return self.get_task(task_id)
 
     # ---------- propostas ----------
     def create_proposal(self, actor: Actor, p: ProposalIn) -> dict[str, Any]:
@@ -625,6 +630,124 @@ class Service:
             self.emit("schedule.shifted", {"semester": semester, "courses": changed})
         self._replan("plano de estudo adaptado")
         return {"semester": semester, "courses": changed}
+
+    # ---------- cronômetro da tarefa (iniciar / pausar) ----------
+    @staticmethod
+    def _running_seconds(task: dict[str, Any], now: datetime) -> int:
+        if not task.get("started_at"):
+            return 0
+        return max(0, int((now - datetime.fromisoformat(task["started_at"])).total_seconds()))
+
+    def start_task(self, actor: Actor, task_id: int) -> dict[str, Any]:
+        """Inicia o cronômetro; só uma tarefa roda por vez (a anterior é pausada). Não mexe em updated_at (não invalida propostas)."""
+        if not actor.can("tasks:complete"):
+            raise Rejected("sem permissão para iniciar tarefas", 403)
+        with tx(self.conn):
+            task = self.get_task(task_id)
+            if task["status"] != "open":
+                raise Rejected("só tarefas abertas podem ser iniciadas", 409)
+            if task["started_at"]:
+                return task
+            now = self.clock()
+            for other in self.conn.execute("SELECT * FROM task WHERE started_at IS NOT NULL").fetchall():
+                self._pause_row(dict(other), now)
+            self.conn.execute("UPDATE task SET started_at=? WHERE id=?", (iso(now), task_id))
+            self.emit("task.started", {"task_id": task_id, "title": task["title"]})
+            return self.get_task(task_id)
+
+    def _pause_row(self, task: dict[str, Any], now: datetime) -> None:
+        spent = task["spent_seconds"] + self._running_seconds(task, now)
+        self.conn.execute("UPDATE task SET started_at=NULL, spent_seconds=? WHERE id=?", (spent, task["id"]))
+        self.emit("task.paused", {"task_id": task["id"], "title": task["title"], "spent_seconds": spent})
+
+    def pause_task(self, actor: Actor, task_id: int) -> dict[str, Any]:
+        if not actor.can("tasks:complete"):
+            raise Rejected("sem permissão para pausar tarefas", 403)
+        with tx(self.conn):
+            task = self.get_task(task_id)
+            if task["started_at"]:
+                self._pause_row(task, self.clock())
+            return self.get_task(task_id)
+
+    # ---------- progresso (XP, nível, streak, freezes) ----------
+    def _progress_cfg(self) -> ProgressConfig:
+        s = self.settings
+        return ProgressConfig(daily_min=s.daily_target, dayoff_min=s.dayoff_target, programmed_goal=s.programmed_goal)
+
+    def progress_sync(self) -> None:
+        """Atualiza a foto do dia de hoje (tarefas marcadas, programadas, folga). A última foto antes das 04:00 fecha o dia."""
+        today = self.today()
+        with tx(self.conn):
+            scheduled = [r["id"] for r in self.conn.execute(
+                "SELECT id FROM task WHERE status != 'dropped' AND (planned_for = ? OR (planned_for IS NULL AND due = ?)) ORDER BY id",
+                (today, today))]
+            programmed = self.conn.execute("SELECT COUNT(*) FROM task WHERE status='open'").fetchone()[0] + self._done_on_day(today)
+            self.conn.execute(
+                "INSERT INTO day_snap(day, scheduled, programmed, dayoff, updated_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(day) DO UPDATE SET scheduled=excluded.scheduled, programmed=excluded.programmed, "
+                "dayoff=excluded.dayoff, updated_at=excluded.updated_at",
+                (today, json.dumps(scheduled), programmed, int(today in self.dayoffs()), self.now()))
+
+    def progress(self) -> dict[str, Any]:
+        self.progress_sync()
+        comps = []
+        for r in self.conn.execute("SELECT payload FROM event WHERE type='task.completed' ORDER BY id"):
+            p = json.loads(r["payload"])
+            comps.append(Completion(p["task_id"], p["day"], bool(p.get("late"))))
+        snaps = [DaySnap(r["day"], tuple(json.loads(r["scheduled"])), r["programmed"], bool(r["dayoff"]))
+                 for r in self.conn.execute("SELECT * FROM day_snap ORDER BY day")]
+        return compute_progress(comps, snaps, self.today(), self._progress_cfg())
+
+    # ---------- visão para o shell (uma chamada só) ----------
+    def snapshot(self, days_before: int = 31, days_after: int = 45) -> dict[str, Any]:
+        today = self.today()
+        t0 = date.fromisoformat(today)
+        iso_ = lambda n: (t0 + timedelta(days=n)).isoformat()  # noqa: E731
+        courses = self.list_courses()
+        course_idx = {c["key"]: i for i, c in enumerate(sorted(courses, key=lambda c: c["id"]))}
+        names = {c["key"]: c["name"] for c in courses}
+
+        def ui(t: dict[str, Any]) -> dict[str, Any]:
+            day = t["planned_for"] or t["due"]
+            running = self._running_seconds(t, self.clock())
+            return {
+                "id": t["id"], "title": t["title"], "course": t["course"], "course_name": names.get(t["course"] or ""),
+                "course_idx": course_idx.get(t["course"] or ""), "kind": t["kind"], "source": t["source"], "status": t["status"],
+                "due": t["due"], "planned_for": t["planned_for"], "day": day,
+                "late": bool(t["due"]) and t["due"] < today and t["status"] == "open",
+                "delivery": t["kind"] != "study" and bool(t["due"]),       # entrega marcada (Moodle/manual com prazo): duas fitas
+                "running": bool(t["started_at"]), "spent_seconds": t["spent_seconds"] + running, "est_minutes": t["est_minutes"],
+            }
+
+        open_ = [ui(t) for t in self.list_tasks("open")]
+        buckets: dict[str, list[dict[str, Any]]] = {"today": [], "tomorrow": [], "week": [], "fifteen": [], "later": [], "undated": []}
+        for t in open_:
+            d = t["day"]
+            key = ("undated" if d is None else "today" if d <= today else "tomorrow" if d <= iso_(1)
+                   else "week" if d <= iso_(7) else "fifteen" if d <= iso_(15) else "later")
+            buckets[key].append(t)
+        done_today = [ui(dict(r)) for r in self.conn.execute("SELECT * FROM task WHERE status='done' AND substr(done_at,1,10) >= ? ORDER BY done_at", (iso_(-1),))]
+        done_today = [t for t in done_today if self._done_day_of(t["id"]) == today]
+
+        cal = self.calendar(iso_(-days_before), iso_(days_after))
+        dots: dict[str, list[dict[str, Any]]] = {}
+        for t in open_:
+            if t["day"] and iso_(-days_before) <= t["day"] <= iso_(days_after):
+                dots.setdefault(t["day"], []).append({"course_idx": t["course_idx"], "kind": t["kind"], "delivery": t["delivery"]})
+        active = next((t for t in open_ if t["running"]), None)
+        return {
+            "today": today, "now": self.now(), "progress": self.progress(), "summary": self.summary(),
+            "tasks": buckets, "done_today": done_today, "active": active, "task_dots": dots,
+            "courses": [{"key": c["key"], "name": c["name"], "idx": course_idx[c["key"]]} for c in courses],
+            "calendar": cal,
+            "today_timed": [s for s in cal if s["date"] == today and s["start"]],
+            "today_allday": [s for s in cal if s["date"] == today and not s["start"]],
+            "dayoffs": sorted(d for d in self.dayoffs() if iso_(-days_before) <= d <= iso_(days_after)),
+        }
+
+    def _done_day_of(self, task_id: int) -> str | None:
+        r = self.conn.execute("SELECT payload FROM event WHERE type='task.completed' AND json_extract(payload,'$.task_id')=? ORDER BY id LIMIT 1", (task_id,)).fetchone()
+        return json.loads(r["payload"])["day"] if r else None
 
 
 def _d(d: date | None) -> str | None:

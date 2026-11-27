@@ -96,6 +96,17 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX session_date ON session(date);
     """,
+    """
+    CREATE TABLE day_snap (                       -- última foto de cada dia: base do fechamento (streak)
+        day        TEXT PRIMARY KEY,
+        scheduled  TEXT NOT NULL DEFAULT '[]',    -- ids das tarefas marcadas para o dia
+        programmed INTEGER NOT NULL DEFAULT 0,    -- tarefas programadas (abertas + feitas no dia)
+        dayoff     INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+    );
+    ALTER TABLE task ADD COLUMN started_at TEXT;                         -- cronômetro em andamento
+    ALTER TABLE task ADD COLUMN spent_seconds INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 

@@ -26,7 +26,7 @@ def create_app(settings: Settings | None = None, clock: Clock = system_clock) ->
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI):
-        task = asyncio.create_task(_planner_loop(settings, clock)) if settings.planner_enabled else None
+        task = asyncio.create_task(_planner_loop(settings, clock))
         try:
             yield
         finally:
@@ -101,6 +101,24 @@ def create_app(settings: Settings | None = None, clock: Clock = system_clock) ->
         response.status_code = 201 if created else 200
         sync_projection(conn)
         return task
+
+    @app.post("/tasks/{task_id}/start")
+    def start(task_id: int, conn: Conn, actor: Who) -> dict[str, Any]:
+        return svc(conn).start_task(actor, task_id)
+
+    @app.post("/tasks/{task_id}/pause")
+    def pause(task_id: int, conn: Conn, actor: Who) -> dict[str, Any]:
+        return svc(conn).pause_task(actor, task_id)
+
+    @app.get("/progress")
+    def progress(conn: Conn, actor: Who) -> dict[str, Any]:
+        need(actor, "tasks:read")
+        return svc(conn).progress()
+
+    @app.get("/snapshot")
+    def snapshot(conn: Conn, actor: Who, before: int = 31, after: int = 45) -> dict[str, Any]:
+        need(actor, "tasks:read")
+        return svc(conn).snapshot(min(max(before, 0), 120), min(max(after, 0), 200))
 
     @app.post("/tasks/{task_id}/complete")
     def complete(task_id: int, conn: Conn, actor: Who) -> dict[str, Any]:
@@ -222,7 +240,9 @@ async def _planner_loop(settings: Settings, clock: Clock) -> None:
     def tick() -> None:
         conn = connect(settings.db_path)
         try:
-            Service(conn, settings, clock).maybe_daily_plan()
+            svc_ = Service(conn, settings, clock)
+            svc_.progress_sync()                    # mantém a foto do dia em dia (o fechamento da streak usa a última)
+            svc_.maybe_daily_plan()
         finally:
             conn.close()
 
