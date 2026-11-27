@@ -57,9 +57,9 @@ Edite `Environment=STUDYAGENT_TASKS_FILE` e `ReadWritePaths` no `.service` se se
 ### 3. Tokens (rode como o usuário do agente; o token só aparece uma vez)
 
 ```bash
-SA="sudo -u studyagent env STUDYAGENT_STATE_DIR=/var/lib/studyagent /opt/studyagent/venv/bin/studyagent"
-$SA admin init
-$SA admin token-create shell user --replace --out /tmp/shell.token   # usado por você e pelo Quickshell
+sa() { sudo -u studyagent env STUDYAGENT_STATE_DIR=/var/lib/studyagent /opt/studyagent/venv/bin/studyagent "$@"; }   # função (vale em bash e zsh)
+sa admin init
+sa admin token-create shell user --replace --out /tmp/shell.token   # usado por você e pelo Quickshell
 mkdir -p ~/.config/studyagent && sudo install -m600 -o $USER /tmp/shell.token ~/.config/studyagent/token && sudo shred -u /tmp/shell.token
 ```
 
