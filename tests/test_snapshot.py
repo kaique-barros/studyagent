@@ -79,3 +79,8 @@ def test_today_tasks_carry_reschedule_options(env):
     assert [o["day"] for o in opts] == ["2026-11-22", "2026-11-23", "2026-11-24"]
     late = mk(env, "atrasada", due="2026-11-18")
     assert next(x for x in snap(env)["tasks"]["today"] if x["id"] == late["id"])["options"] == []   # prazo fixo já passou
+
+
+def test_snapshot_has_last_event(env):
+    mk(env, "x", due="2026-11-21")
+    assert snap(env)["last_event"] >= 1

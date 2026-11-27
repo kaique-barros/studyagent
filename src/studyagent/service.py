@@ -777,7 +777,8 @@ class Service:
                 dots.setdefault(t["day"], []).append({"course_idx": t["course_idx"], "kind": t["kind"], "delivery": t["delivery"]})
         active = next((t for t in open_ if t["running"]), None)
         return {
-            "today": today, "now": self.now(), "progress": self.progress(), "summary": self.summary(),
+            "today": today, "now": self.now(), "last_event": self.conn.execute("SELECT COALESCE(MAX(id),0) FROM event").fetchone()[0],
+            "progress": self.progress(), "summary": self.summary(),
             "tasks": buckets, "done_today": done_today, "active": active, "task_dots": dots,
             "courses": [{"key": c["key"], "name": c["name"] or c["key"], "idx": course_idx[c["key"]]} for c in courses],
             "calendar": cal,
