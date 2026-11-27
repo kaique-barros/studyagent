@@ -26,10 +26,20 @@ Moodle, planejador, materiais/RAG, FSRS nem a interface no Quickshell.
 
 ## Instalação (Arch)
 
+Resumo: o daemon roda como o usuário `studyagent` (systemd); você e o Quickshell falam com ele pelo comando `studyagent`, via socket Unix.
+
+### 1. Programa e comando
+
 ```bash
 sudo install -d /opt/studyagent && sudo python -m venv /opt/studyagent/venv
 sudo /opt/studyagent/venv/bin/pip install -r /caminho/para/studyagent/requirements.txt
 sudo /opt/studyagent/venv/bin/pip install --no-deps /caminho/para/studyagent
+sudo ln -sf /opt/studyagent/venv/bin/studyagent /usr/local/bin/studyagent    # comando global (o Quickshell usa este)
+```
+
+### 2. Usuário, pasta da projeção e serviço
+
+```bash
 sudo install -m644 deploy/studyagent.sysusers /etc/sysusers.d/studyagent.conf && sudo systemd-sysusers
 sudo usermod -aG studyagent $USER            # acesso ao socket (faça logout/login)
 
@@ -42,16 +52,44 @@ sudo install -m644 deploy/studyagentd.service /etc/systemd/system/studyagentd.se
 sudo systemctl daemon-reload && sudo systemctl enable --now studyagentd
 ```
 
-Tokens (rode como o usuário do agente; o token só aparece uma vez):
+Edite `Environment=STUDYAGENT_TASKS_FILE` e `ReadWritePaths` no `.service` se seu vault não for `~/Obsidian Vault`. O banco fica em `/var/lib/studyagent` (só o agente lê) e o socket em `/run/studyagent/api.sock`.
+
+### 3. Tokens (rode como o usuário do agente; o token só aparece uma vez)
 
 ```bash
 SA="sudo -u studyagent env STUDYAGENT_STATE_DIR=/var/lib/studyagent /opt/studyagent/venv/bin/studyagent"
 $SA admin init
-$SA admin token-create shell user --replace --out /tmp/shell.token   # --replace: substitui um token "shell" antigo
+$SA admin token-create shell user --replace --out /tmp/shell.token   # usado por você e pelo Quickshell
 mkdir -p ~/.config/studyagent && sudo install -m600 -o $USER /tmp/shell.token ~/.config/studyagent/token && sudo shred -u /tmp/shell.token
 ```
 
-No Quickshell, aponte o `tasksFile` do `CalendarBox` para `~/Obsidian Vault/Agente/Tarefas.md`.
+Os tokens `planner` (agente LLM) e `schedule` (leitor de PDFs) são criados do mesmo jeito; veja as seções abaixo.
+
+### 4. Conferir
+
+```bash
+systemctl status studyagentd      # active (running)
+studyagent status                 # resumo do dia
+studyagent ui snapshot | head -c 300
+```
+
+### Atualizar
+
+```bash
+sudo /opt/studyagent/venv/bin/pip install --no-deps --upgrade /caminho/para/studyagent
+sudo systemctl restart studyagentd            # aplica migrações do banco e novas permissões
+systemctl --user restart studyagent-schedule  # se estiver usando o leitor de cronogramas
+```
+
+Sempre reinicie o daemon depois de atualizar: um daemon antigo responde 404/403 nos endpoints novos.
+
+### Iniciar / parar
+
+- Daemon: `systemctl start|stop|restart studyagentd` (sobe no boot por causa do `enable`). Logs: `journalctl -u studyagentd -f`.
+- Agente LLM e revisão semanal (opcionais): timers em `deploy/` (`studyagent-agent.timer`, `studyagent-review.timer`).
+- Leitor de cronogramas (opcional): `systemctl --user enable --now studyagent-schedule.service`.
+- Sem systemd (teste): `STUDYAGENT_STATE_DIR=~/.local/state/studyagent studyagent serve`.
+- Quickshell: não precisa de nada além do comando `studyagent` e do token em `~/.config/studyagent/token`; a tela de produtividade chama `studyagent ui snapshot`.
 
 ## Uso (CLI)
 
@@ -170,4 +208,4 @@ STUDYAGENT_STATE_DIR=./state STUDYAGENT_SOCKET=/tmp/sa.sock studyagent admin ini
 - `studyagent ui snapshot` / `ui progress`: JSON para o Quickshell (sem HTTP no QML). `studyagent task start|pause|done|move`.
 - XP, nível, streak, freezes: `progress.py` (função pura), calculado do log de eventos + `day_snap` (foto diária; o dia vira às 04:00).
 - Premissas ajustáveis: bônus de dia cumprido 20 XP, freeze a cada 60 tarefas (máx. 3), semana = 7 dias corridos, fita de entrega = tarefa que não é `study` e tem prazo.
-- Instalar o comando: `sudo ln -sf "$(pwd)/.venv/bin/studyagent" /usr/local/bin/studyagent`.
+- O comando global `studyagent` é instalado na seção Instalação.
