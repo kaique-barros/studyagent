@@ -1,0 +1,20 @@
+#!/bin/sh
+# Cria (ou substitui) um token e o instala em um arquivo seu, sem depender de variáveis do shell (funciona igual em bash e zsh).
+# Rode como VOCÊ (não como root); pede a senha do sudo.
+#   deploy/studyagent-token shell user                       -> ~/.config/studyagent/token  (usado pelo comando e pelo Quickshell)
+#   deploy/studyagent-token planner planner ~/.config/studyagent/planner.token
+#   deploy/studyagent-token schedule schedule ~/.config/studyagent/schedule.token
+set -eu
+name=${1:-}; scope=${2:-}; dest=${3:-$HOME/.config/studyagent/token}
+[ -n "$name" ] && [ -n "$scope" ] || { echo "uso: $0 NOME ESCOPO [DESTINO]" >&2; exit 2; }
+[ "$(id -u)" -ne 0 ] || { echo "rode como seu usuário, não como root" >&2; exit 2; }
+
+BIN=${STUDYAGENT_BIN:-/opt/studyagent/venv/bin/studyagent}
+STATE=${STUDYAGENT_STATE_DIR:-/var/lib/studyagent}
+tmp=$(sudo -u studyagent mktemp "$STATE/token.XXXXXX")
+trap 'sudo shred -u "$tmp" 2>/dev/null || true' EXIT
+
+sudo -u studyagent env STUDYAGENT_STATE_DIR="$STATE" "$BIN" admin token-create "$name" "$scope" --replace --out "$tmp"
+mkdir -p "$(dirname "$dest")"
+sudo install -m600 -o "$(id -un)" "$tmp" "$dest"
+echo "token '$name' ($scope) instalado em $dest"

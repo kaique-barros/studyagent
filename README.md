@@ -54,16 +54,17 @@ sudo systemctl daemon-reload && sudo systemctl enable --now studyagentd
 
 Edite `Environment=STUDYAGENT_TASKS_FILE` e `ReadWritePaths` no `.service` se seu vault não for `~/Obsidian Vault`. O banco fica em `/var/lib/studyagent` (só o agente lê) e o socket em `/run/studyagent/api.sock`.
 
-### 3. Tokens (rode como o usuário do agente; o token só aparece uma vez)
+### 3. Tokens
+
+Um script faz tudo (cria o banco se faltar, gera o token, instala no seu usuário e apaga a cópia temporária). Rode como **você**, dentro da pasta do projeto:
 
 ```bash
-sa() { sudo -u studyagent env STUDYAGENT_STATE_DIR=/var/lib/studyagent /opt/studyagent/venv/bin/studyagent "$@"; }   # função (vale em bash e zsh)
-sa admin init
-sa admin token-create shell user --replace --out /tmp/shell.token   # usado por você e pelo Quickshell
-mkdir -p ~/.config/studyagent && sudo install -m600 -o $USER /tmp/shell.token ~/.config/studyagent/token && sudo shred -u /tmp/shell.token
+sudo -u studyagent env STUDYAGENT_STATE_DIR=/var/lib/studyagent /opt/studyagent/venv/bin/studyagent admin init
+sudo install -m755 deploy/studyagent-token /usr/local/bin/studyagent-token
+studyagent-token shell user          # -> ~/.config/studyagent/token (usado por você e pelo Quickshell)
 ```
 
-Os tokens `planner` (agente LLM) e `schedule` (leitor de PDFs) são criados do mesmo jeito; veja as seções abaixo.
+Gerar de novo substitui o anterior (o antigo para de funcionar): é o conserto para `erro 401: token inválido ou revogado`. Os tokens `planner` (agente LLM) e `schedule` (leitor de PDFs) são criados do mesmo jeito, com destino próprio, por exemplo `studyagent-token planner planner ~/.config/studyagent/planner.token`.
 
 ### 4. Conferir
 
