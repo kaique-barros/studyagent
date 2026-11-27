@@ -739,7 +739,7 @@ class Service:
         iso_ = lambda n: (t0 + timedelta(days=n)).isoformat()  # noqa: E731
         courses = self.list_courses()
         course_idx = {c["key"]: i for i, c in enumerate(sorted(courses, key=lambda c: c["id"]))}
-        names = {c["key"]: c["name"] for c in courses}
+        names = {c["key"]: (c["name"] or c["key"]) for c in courses}
 
         def ui(t: dict[str, Any]) -> dict[str, Any]:
             day = t["planned_for"] or t["due"]
@@ -779,7 +779,7 @@ class Service:
         return {
             "today": today, "now": self.now(), "progress": self.progress(), "summary": self.summary(),
             "tasks": buckets, "done_today": done_today, "active": active, "task_dots": dots,
-            "courses": [{"key": c["key"], "name": c["name"], "idx": course_idx[c["key"]]} for c in courses],
+            "courses": [{"key": c["key"], "name": c["name"] or c["key"], "idx": course_idx[c["key"]]} for c in courses],
             "calendar": cal,
             "today_timed": [s for s in cal if s["date"] == today and s["start"]],
             "today_allday": [s for s in cal if s["date"] == today and not s["start"]],

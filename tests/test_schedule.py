@@ -269,3 +269,16 @@ def test_scan_survives_bad_pdf(env, tmp_path, monkeypatch):
     res = schedule_scan.scan(env, tmp_path / "UFMG", None, failed)
     assert "error" in res[0] and failed
     assert schedule_scan.scan(env, tmp_path / "UFMG", None, failed) == []   # não repete o PDF ruim a cada varredura
+
+
+def test_snapshot_with_courses(env):
+    approve(env, propose(env, "DCC216").json()["id"])
+    approve(env, propose(env, "CPP", h="h2").json()["id"])
+    s = env.get("/snapshot", params={"before": 120, "after": 200}, headers=H(env, "viewer")).json()
+    assert {c["key"] for c in s["courses"]} == {"DCC216", "CPP"} and sorted(c["idx"] for c in s["courses"]) == [0, 1]
+    assert s["calendar"] and all("highlight" in x for x in s["calendar"])
+    t = next(t for b in s["tasks"].values() for t in b)
+    assert t["course_idx"] in (0, 1) and t["course_name"] and t["delivery"] is False
+    assert s["task_dots"] and all("course_idx" in d for v in s["task_dots"].values() for d in v)
+    import json as _j
+    _j.dumps(s)
