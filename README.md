@@ -164,3 +164,10 @@ STUDYAGENT_STATE_DIR=./state STUDYAGENT_SOCKET=/tmp/sa.sock studyagent admin ini
 - Tarefa "planejada" (`planned_for`) que não foi feita no dia ainda não conta como atrasada: `late` compara só com `due`.
   Streak/mínimo diário ainda não são calculados no core (o XP do Quickshell os consome dos eventos).
 - `late` e `day` já vêm no evento, mas o XP do Quickshell ainda lê o `[x]` do arquivo (será trocado pelo SSE).
+
+## Progresso e tela de produtividade
+
+- `studyagent ui snapshot` / `ui progress`: JSON para o Quickshell (sem HTTP no QML). `studyagent task start|pause|done|move`.
+- XP, nível, streak, freezes: `progress.py` (função pura), calculado do log de eventos + `day_snap` (foto diária; o dia vira às 04:00).
+- Premissas ajustáveis: bônus de dia cumprido 20 XP, freeze a cada 60 tarefas (máx. 3), semana = 7 dias corridos, fita de entrega = tarefa que não é `study` e tem prazo.
+- Instalar o comando: `sudo ln -sf "$(pwd)/.venv/bin/studyagent" /usr/local/bin/studyagent`.

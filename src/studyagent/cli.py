@@ -28,6 +28,8 @@ schedule_app = typer.Typer(help="cronogramas de aula (PDF) -> matérias, calend�
 app.add_typer(agent_app, name="agent")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(task_app, name="task")
+ui_app = typer.Typer(help="saída JSON para o shell (Quickshell)", no_args_is_help=True)
+app.add_typer(ui_app, name="ui")
 app.add_typer(prop_app, name="proposal")
 app.add_typer(admin_app, name="admin")
 
@@ -92,6 +94,29 @@ def task_add(title: str, due: Optional[str] = typer.Option(None, help="aaaa-mm-d
 @task_app.command("done")
 def task_done(task_id: int):
     typer.echo(_show_task(_call("POST", f"/tasks/{task_id}/complete")))
+
+
+@task_app.command("start")
+def task_start(task_id: int):
+    """Inicia o cronômetro da tarefa (pausa a que estiver rodando)."""
+    typer.echo(_show_task(_call("POST", f"/tasks/{task_id}/start")))
+
+
+@task_app.command("pause")
+def task_pause(task_id: int):
+    typer.echo(_show_task(_call("POST", f"/tasks/{task_id}/pause")))
+
+
+@ui_app.command("snapshot")
+def ui_snapshot(before: int = typer.Option(31, help="dias antes de hoje no calendário"),
+                after: int = typer.Option(45, help="dias depois de hoje")):
+    """Tudo que a tela de produtividade precisa, em um JSON compacto."""
+    typer.echo(json.dumps(_call("GET", "/snapshot", params={"before": before, "after": after}), ensure_ascii=False, separators=(",", ":")))
+
+
+@ui_app.command("progress")
+def ui_progress():
+    typer.echo(json.dumps(_call("GET", "/progress"), ensure_ascii=False, separators=(",", ":")))
 
 
 @task_app.command("move")
