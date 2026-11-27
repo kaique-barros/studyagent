@@ -240,3 +240,7 @@ class DayoffIn(BaseModel):
 
 class DecideIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class PlanDayIn(BaseModel):
+    planned_for: str

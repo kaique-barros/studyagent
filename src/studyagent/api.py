@@ -13,7 +13,7 @@ from . import __version__, projection
 from .auth import Actor, authenticate
 from .config import Settings
 from .db import connect, migrate
-from .models import DayoffIn, FeedbackIn, ShiftIn, ProposalIn, ReasonIn, RescheduleIn, TaskIn
+from .models import DayoffIn, PlanDayIn, FeedbackIn, ShiftIn, ProposalIn, ReasonIn, RescheduleIn, TaskIn
 from .service import Clock, Rejected, Service, system_clock
 
 
@@ -105,6 +105,12 @@ def create_app(settings: Settings | None = None, clock: Clock = system_clock) ->
     @app.post("/tasks/{task_id}/start")
     def start(task_id: int, conn: Conn, actor: Who) -> dict[str, Any]:
         return svc(conn).start_task(actor, task_id)
+
+    @app.post("/tasks/{task_id}/plan")
+    def plan_one(task_id: int, body: PlanDayIn, conn: Conn, actor: Who) -> dict[str, Any]:
+        task = svc(conn).plan_task(actor, task_id, body.planned_for)
+        sync_projection(conn)
+        return task
 
     @app.post("/tasks/{task_id}/pause")
     def pause(task_id: int, conn: Conn, actor: Who) -> dict[str, Any]:

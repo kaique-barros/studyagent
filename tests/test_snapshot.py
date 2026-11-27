@@ -62,3 +62,20 @@ def test_progress_reflects_completion(env):
     env.post(f"/tasks/{t['id']}/complete", headers=env.h("user"))
     p = env.get("/progress", headers=env.h("viewer")).json()
     assert p["xp"] > 0 and p["total_done"] == 1 and p["today"]["done"] == 1
+
+
+def test_plan_task_moves_planned_for_within_due(env):
+    t = mk(env, "x", due="2026-11-25")
+    ok = env.post(f"/tasks/{t['id']}/plan", json={"planned_for": "2026-11-23"}, headers=env.h("user"))
+    assert ok.status_code == 200 and ok.json()["planned_for"] == "2026-11-23" and ok.json()["due"] == "2026-11-25"
+    assert env.post(f"/tasks/{t['id']}/plan", json={"planned_for": "2026-11-26"}, headers=env.h("user")).status_code == 422   # depois do prazo
+    assert env.post(f"/tasks/{t['id']}/plan", json={"planned_for": "2026-11-21"}, headers=env.h("user")).status_code == 422   # hoje não
+    assert env.post(f"/tasks/{t['id']}/plan", json={"planned_for": "2026-11-23"}, headers=env.h("viewer")).status_code == 403
+
+
+def test_today_tasks_carry_reschedule_options(env):
+    t = mk(env, "x", due="2026-11-24", planned_for="2026-11-21")
+    opts = next(x for x in snap(env)["tasks"]["today"] if x["id"] == t["id"])["options"]
+    assert [o["day"] for o in opts] == ["2026-11-22", "2026-11-23", "2026-11-24"]
+    late = mk(env, "atrasada", due="2026-11-18")
+    assert next(x for x in snap(env)["tasks"]["today"] if x["id"] == late["id"])["options"] == []   # prazo fixo já passou

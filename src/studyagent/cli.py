@@ -102,6 +102,12 @@ def task_start(task_id: int):
     typer.echo(_show_task(_call("POST", f"/tasks/{task_id}/start")))
 
 
+@task_app.command("plan")
+def task_plan(task_id: int, day: str = typer.Argument(..., help="aaaa-mm-dd (depois de hoje e até o prazo)")):
+    """Reprograma o dia da tarefa (direto, sem proposta; o prazo não muda)."""
+    typer.echo(_show_task(_call("POST", f"/tasks/{task_id}/plan", json={"planned_for": day})))
+
+
 @task_app.command("pause")
 def task_pause(task_id: int):
     typer.echo(_show_task(_call("POST", f"/tasks/{task_id}/pause")))

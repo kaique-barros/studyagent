@@ -669,6 +669,40 @@ class Service:
                 self._pause_row(task, self.clock())
             return self.get_task(task_id)
 
+    # ---------- reprogramar (só planned_for; o prazo é fixo) ----------
+    def plan_task(self, actor: Actor, task_id: int, planned_for: str) -> dict[str, Any]:
+        """Ação direta do estudante: muda só o dia planejado. Precisa ser depois de hoje e nunca depois do prazo."""
+        if not actor.can("tasks:complete"):
+            raise Rejected("sem permissão para reprogramar tarefas", 403)
+        try:
+            day = date.fromisoformat(planned_for)
+        except ValueError:
+            raise Rejected("data inválida (use aaaa-mm-dd)", 422)
+        today = self.today()
+        with tx(self.conn):
+            task = self.get_task(task_id)
+            if task["status"] != "open":
+                raise Rejected("só tarefas abertas podem ser reprogramadas", 409)
+            if day.isoformat() <= today:
+                raise Rejected("escolha um dia depois de hoje", 422)
+            if task["due"] and day.isoformat() > task["due"]:
+                raise Rejected(f"o prazo é fixo ({task['due']}): não dá para planejar depois dele", 422)
+            now = self.now()
+            self.conn.execute("UPDATE task SET planned_for=?, updated_at=? WHERE id=?", (day.isoformat(), now, task_id))
+            self.emit("task.updated", {"task_id": task_id, "source": actor.source, "changed": {"planned_for": day.isoformat()}})
+        self.progress_sync()
+        return self.get_task(task_id)
+
+    def _plan_options(self, task: dict[str, Any], today: str, loads: dict[str, int], dayoffs: set[str], horizon: int = 14) -> list[dict[str, Any]]:
+        t0 = date.fromisoformat(today)
+        last = min(t0 + timedelta(days=horizon), date.fromisoformat(task["due"])) if task["due"] else t0 + timedelta(days=horizon)
+        out, d = [], t0 + timedelta(days=1)
+        while d <= last:
+            k = d.isoformat()
+            out.append({"day": k, "count": loads.get(k, 0), "dayoff": k in dayoffs})
+            d += timedelta(days=1)
+        return out
+
     # ---------- progresso (XP, nível, streak, freezes) ----------
     def _progress_cfg(self) -> ProgressConfig:
         s = self.settings
@@ -720,6 +754,13 @@ class Service:
             }
 
         open_ = [ui(t) for t in self.list_tasks("open")]
+        loads: dict[str, int] = {}
+        for t in open_:
+            if t["day"]:
+                loads[t["day"]] = loads.get(t["day"], 0) + 1
+        offs = self.dayoffs()
+        for t in open_:
+            t["options"] = self._plan_options(t, today, loads, offs) if t["day"] is not None and t["day"] <= today else []
         buckets: dict[str, list[dict[str, Any]]] = {"today": [], "tomorrow": [], "week": [], "fifteen": [], "later": [], "undated": []}
         for t in open_:
             d = t["day"]
